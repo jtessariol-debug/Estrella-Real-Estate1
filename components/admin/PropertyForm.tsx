@@ -1,0 +1,123 @@
+import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
+import { ArrowDown, ArrowUp, Eye, ImagePlus, Star, Trash2, X } from 'lucide-react';
+import type { AdminProperty, AdminPropertyImage, Amenity, OperationType, PropertyInput, PropertyStatus, PropertyType } from '../../types';
+import { archiveProperty, createProperty, deleteProperty, deletePropertyImage, deletePropertyVideo, getAmenities, reorderPropertyImages, setCoverImage, setPropertyAmenities, updateProperty, uploadPropertyImage, uploadPropertyVideo } from '../../services/admin';
+import { slugify } from '../../utils/slug';
+
+type FormValues = {
+  title: string; slug: string; description: string; price: string; currency: 'DOP' | 'USD';
+  operationType: OperationType; propertyType: PropertyType; status: PropertyStatus;
+  bedrooms: string; bathrooms: string; parkingSpaces: string; areaM2: string;
+  city: string; sector: string; address: string; latitude: string; longitude: string;
+  published: boolean; featured: boolean; amenityIds: string[];
+};
+type Errors = Partial<Record<keyof FormValues, string>>;
+type PendingImage = { file: File; preview: string };
+
+const EMPTY_VALUES: FormValues = { title: '', slug: '', description: '', price: '', currency: 'DOP', operationType: 'sale', propertyType: 'apartment', status: 'draft', bedrooms: '', bathrooms: '', parkingSpaces: '', areaM2: '', city: 'Santiago', sector: '', address: '', latitude: '', longitude: '', published: false, featured: false, amenityIds: [] };
+const STATUS_LABELS: Record<PropertyStatus, string> = { draft: 'Borrador', available: 'Disponible', reserved: 'Reservada', sold: 'Vendida', rented: 'Alquilada', inactive: 'Inactiva' };
+const TYPE_LABELS: Record<PropertyType, string> = { apartment: 'Apartamento', house: 'Casa', villa: 'Villa', penthouse: 'Penthouse', land: 'Solar', commercial: 'Local comercial' };
+const toString = (value?: number) => value === undefined ? '' : String(value);
+const fromProperty = (property: AdminProperty): FormValues => ({ title: property.title, slug: property.slug, description: property.description, price: String(property.price), currency: property.currency, operationType: property.operationType, propertyType: property.propertyType, status: property.status, bedrooms: toString(property.bedrooms), bathrooms: toString(property.bathrooms), parkingSpaces: toString(property.parkingSpaces), areaM2: toString(property.areaM2), city: property.city, sector: property.sector ?? '', address: property.address ?? '', latitude: toString(property.latitude), longitude: toString(property.longitude), published: property.published, featured: property.featured, amenityIds: property.amenityIds });
+const optionalNumber = (value: string) => value === '' ? undefined : Number(value);
+
+function validate(values: FormValues): Errors {
+  const errors: Errors = {};
+  if (values.title.trim().length < 3 || values.title.trim().length > 180) errors.title = 'El título debe tener entre 3 y 180 caracteres.';
+  if (!values.slug.trim()) errors.slug = 'El slug es obligatorio.';
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(values.slug)) errors.slug = 'Usa minúsculas, números y guiones simples.';
+  if (!values.description.trim()) errors.description = 'La descripción es obligatoria.';
+  if (!values.price || !Number.isFinite(Number(values.price)) || Number(values.price) <= 0) errors.price = 'El precio debe ser mayor que cero.';
+  if (!values.city.trim()) errors.city = 'La ciudad es obligatoria.';
+  (['bedrooms', 'bathrooms', 'parkingSpaces'] as const).forEach((key) => { if (values[key] !== '' && Number(values[key]) < 0) errors[key] = 'El valor no puede ser negativo.'; });
+  if (values.areaM2 !== '' && Number(values.areaM2) <= 0) errors.areaM2 = 'El área debe ser mayor que cero.';
+  if (values.bedrooms !== '' && !Number.isInteger(Number(values.bedrooms))) errors.bedrooms = 'Usa un número entero.';
+  if (values.parkingSpaces !== '' && !Number.isInteger(Number(values.parkingSpaces))) errors.parkingSpaces = 'Usa un número entero.';
+  if (values.latitude !== '' && (Number(values.latitude) < -90 || Number(values.latitude) > 90)) errors.latitude = 'La latitud debe estar entre -90 y 90.';
+  if (values.longitude !== '' && (Number(values.longitude) < -180 || Number(values.longitude) > 180)) errors.longitude = 'La longitud debe estar entre -180 y 180.';
+  return errors;
+}
+
+function TextField({ id, label, value, onChange, error, type = 'text', step, min }: { id: keyof FormValues; label: string; value: string; onChange: (value: string) => void; error?: string; type?: string; step?: string; min?: string }) {
+  return <div className="admin-field"><label htmlFor={id}>{label}</label><input id={id} type={type} step={step} min={min} value={value} onChange={(event) => onChange(event.target.value)} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} />{error && <small id={`${id}-error`} className="field-error">{error}</small>}</div>;
+}
+
+export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
+  const [values, setValues] = useState<FormValues>(() => initial ? fromProperty(initial) : EMPTY_VALUES);
+  const [errors, setErrors] = useState<Errors>({}); const [amenities, setAmenities] = useState<Amenity[]>([]);
+  const [images, setImages] = useState<AdminPropertyImage[]>(initial?.images ?? []); const [pending, setPending] = useState<PendingImage[]>([]);
+  const [videoStoragePath, setVideoStoragePath] = useState(initial?.videoStoragePath); const [videoUrl, setVideoUrl] = useState(initial?.videoUrl);
+  const [pendingVideo, setPendingVideo] = useState<PendingImage | null>(null);
+  const [busy, setBusy] = useState(false); const [uploadStatus, setUploadStatus] = useState(''); const [notice, setNotice] = useState<string | null>(() => sessionStorage.getItem('adminNotice'));
+  const [slugTouched, setSlugTouched] = useState(Boolean(initial)); const [confirmAction, setConfirmAction] = useState<'delete' | 'archive' | 'publish' | 'video' | null>(null);
+
+  useEffect(() => { sessionStorage.removeItem('adminNotice'); void getAmenities().then(setAmenities).catch((reason: unknown) => setNotice(reason instanceof Error ? reason.message : 'No pudimos cargar las amenidades.')); }, []);
+  const set = <K extends keyof FormValues>(key: K, value: FormValues[K]) => { setValues((current) => ({ ...current, [key]: value })); setErrors((current) => ({ ...current, [key]: undefined })); };
+  const titleChanged = (title: string) => { set('title', title); if (!slugTouched) set('slug', slugify(title)); };
+
+  const chooseImages = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []); const accepted: PendingImage[] = []; const rejected: string[] = [];
+    files.forEach((file) => { if (!['image/jpeg', 'image/png', 'image/webp', 'image/avif'].includes(file.type)) rejected.push(`${file.name}: formato no permitido`); else if (file.size > 10 * 1024 * 1024) rejected.push(`${file.name}: supera 10 MB`); else accepted.push({ file, preview: URL.createObjectURL(file) }); });
+    setPending((current) => [...current, ...accepted]); if (rejected.length) setNotice(rejected.join('. ')); event.target.value = '';
+  };
+
+  const chooseVideo = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
+    if (file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) { setNotice('Solo puedes subir videos MP4.'); return; }
+    if (file.size > 200 * 1024 * 1024) { setNotice('El video supera el límite máximo permitido de 200 MB.'); return; }
+    if (pendingVideo) URL.revokeObjectURL(pendingVideo.preview);
+    setPendingVideo({ file, preview: URL.createObjectURL(file) });
+  };
+
+  const makeInput = (publishMode?: 'draft' | 'publish'): PropertyInput => {
+    const published = publishMode === 'draft' ? false : publishMode === 'publish' ? true : values.published;
+    const status = publishMode === 'draft' ? 'draft' : publishMode === 'publish' && values.status === 'draft' ? 'available' : values.status;
+    return { title: values.title, slug: values.slug, description: values.description, price: Number(values.price), currency: values.currency, operationType: values.operationType, propertyType: values.propertyType, status, bedrooms: optionalNumber(values.bedrooms), bathrooms: optionalNumber(values.bathrooms), parkingSpaces: optionalNumber(values.parkingSpaces), areaM2: optionalNumber(values.areaM2), city: values.city, sector: values.sector || undefined, address: values.address || undefined, latitude: optionalNumber(values.latitude), longitude: optionalNumber(values.longitude), published, featured: values.featured };
+  };
+
+  const save = async (mode?: 'draft' | 'publish') => {
+    const nextErrors = validate(values); setErrors(nextErrors); if (Object.keys(nextErrors).length) { document.querySelector('[aria-invalid="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+    if (mode === 'publish' && !images.length && !pending.length && confirmAction !== 'publish') { setConfirmAction('publish'); return; }
+    setConfirmAction(null); setBusy(true); setNotice(null); let propertyId = initial?.id;
+    try {
+      if (propertyId) await updateProperty(propertyId, makeInput(mode)); else propertyId = await createProperty(makeInput(mode));
+      await setPropertyAmenities(propertyId, values.amenityIds);
+      for (let index = 0; index < pending.length; index += 1) { setUploadStatus(`Subiendo ${index + 1} de ${pending.length}…`); await uploadPropertyImage(propertyId, pending[index].file, images.length + index, !images.some((image) => image.isCover) && index === 0); }
+      if (pendingVideo) { setUploadStatus('Subiendo video…'); await uploadPropertyVideo(propertyId, pendingVideo.file, videoStoragePath); }
+      sessionStorage.setItem('adminNotice', initial ? (mode === 'publish' ? 'Propiedad publicada correctamente.' : 'Cambios guardados correctamente.') : (mode === 'publish' ? 'Propiedad creada y publicada.' : 'Borrador creado correctamente.'));
+      window.location.replace(`/admin/properties/${propertyId}/edit`);
+    } catch (reason: unknown) { const message = reason instanceof Error ? reason.message : 'No pudimos guardar los cambios.'; if (!initial && propertyId) { sessionStorage.setItem('adminNotice', `La propiedad fue creada parcialmente. ${message}`); window.location.replace(`/admin/properties/${propertyId}/edit`); return; } setNotice(message); setBusy(false); setUploadStatus(''); }
+  };
+
+  const moveImage = async (index: number, direction: -1 | 1) => { const target = index + direction; if (!initial || target < 0 || target >= images.length || busy) return; const reordered = [...images]; [reordered[index], reordered[target]] = [reordered[target], reordered[index]]; setBusy(true); try { await reorderPropertyImages(initial.id, reordered.map((image) => image.id)); setImages(reordered.map((image, position) => ({ ...image, position }))); setNotice('Orden de fotografías actualizado.'); } catch (reason: unknown) { setNotice(reason instanceof Error ? reason.message : 'No pudimos reordenar las imágenes.'); } finally { setBusy(false); } };
+  const makeCover = async (imageId: string) => { if (!initial || busy) return; setBusy(true); try { await setCoverImage(initial.id, imageId); setImages((current) => current.map((image) => ({ ...image, isCover: image.id === imageId }))); setNotice('Portada actualizada.'); } catch (reason: unknown) { setNotice(reason instanceof Error ? reason.message : 'No pudimos cambiar la portada.'); } finally { setBusy(false); } };
+  const removeImage = async (image: AdminPropertyImage) => { if (!initial || busy) return; setBusy(true); try { await deletePropertyImage(initial.id, image); const next = images.filter((item) => item.id !== image.id).map((item, position) => ({ ...item, position })); if (next.length && !next.some((item) => item.isCover)) next[0].isCover = true; setImages(next); setNotice('Imagen eliminada correctamente.'); } catch (reason: unknown) { setNotice(reason instanceof Error ? reason.message : 'No pudimos eliminar la imagen.'); } finally { setBusy(false); } };
+  const destructiveAction = async () => { if (!initial || !confirmAction) return; const action = confirmAction; setConfirmAction(null); setBusy(true); try { if (action === 'video' && videoStoragePath) { await deletePropertyVideo(initial.id, videoStoragePath); setVideoStoragePath(undefined); setVideoUrl(undefined); setNotice('Video eliminado correctamente.'); setBusy(false); return; } if (action === 'archive') { await archiveProperty(initial.id); sessionStorage.setItem('adminNotice', 'Propiedad archivada.'); } else if (action === 'delete') { await deleteProperty(initial.id); sessionStorage.setItem('adminNotice', 'Propiedad eliminada correctamente.'); } window.location.replace('/admin/properties'); } catch (reason: unknown) { setNotice(reason instanceof Error ? reason.message : 'No pudimos completar la operación.'); setBusy(false); } };
+
+  const submit = (event: FormEvent) => { event.preventDefault(); void save(); };
+  return <form className="property-form" onSubmit={submit} noValidate>
+    {notice && <div className="admin-toast" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Cerrar mensaje"><X size={17} /></button></div>}
+    <section className="form-section"><div className="form-section-head"><span>01</span><div><h2>Información general</h2><p>Datos principales para presentar la propiedad.</p></div></div><div className="admin-form-grid">
+      <TextField id="title" label="Título *" value={values.title} onChange={titleChanged} error={errors.title} /><TextField id="slug" label="Slug *" value={values.slug} onChange={(value) => { setSlugTouched(true); set('slug', slugify(value)); }} error={errors.slug} />
+      <div className="admin-field full"><label htmlFor="description">Descripción *</label><textarea id="description" rows={6} value={values.description} onChange={(event) => set('description', event.target.value)} aria-invalid={Boolean(errors.description)} />{errors.description && <small className="field-error">{errors.description}</small>}</div>
+      <TextField id="price" label="Precio *" type="number" min="0" step="0.01" value={values.price} onChange={(value) => set('price', value)} error={errors.price} />
+      <div className="admin-field"><label htmlFor="currency">Moneda *</label><select id="currency" value={values.currency} onChange={(e) => set('currency', e.target.value as 'DOP' | 'USD')}><option value="DOP">RD$ — Peso dominicano</option><option value="USD">US$ — Dólar</option></select></div>
+      <div className="admin-field"><label htmlFor="operation">Operación *</label><select id="operation" value={values.operationType} onChange={(e) => set('operationType', e.target.value as OperationType)}><option value="sale">Venta</option><option value="rent">Alquiler</option></select></div>
+      <div className="admin-field"><label htmlFor="propertyType">Tipo *</label><select id="propertyType" value={values.propertyType} onChange={(e) => set('propertyType', e.target.value as PropertyType)}>{Object.entries(TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+      <div className="admin-field"><label htmlFor="status">Estado *</label><select id="status" value={values.status} onChange={(e) => set('status', e.target.value as PropertyStatus)}>{Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+    </div></section>
+    <section className="form-section"><div className="form-section-head"><span>02</span><div><h2>Características</h2><p>Campos opcionales según el tipo de inmueble.</p></div></div><div className="admin-form-grid four"><TextField id="bedrooms" label="Habitaciones" type="number" min="0" step="1" value={values.bedrooms} onChange={(value) => set('bedrooms', value)} error={errors.bedrooms} /><TextField id="bathrooms" label="Baños" type="number" min="0" step="0.5" value={values.bathrooms} onChange={(value) => set('bathrooms', value)} error={errors.bathrooms} /><TextField id="parkingSpaces" label="Parqueos" type="number" min="0" step="1" value={values.parkingSpaces} onChange={(value) => set('parkingSpaces', value)} error={errors.parkingSpaces} /><TextField id="areaM2" label="Área en m²" type="number" min="0" step="0.01" value={values.areaM2} onChange={(value) => set('areaM2', value)} error={errors.areaM2} /></div></section>
+    <section className="form-section"><div className="form-section-head"><span>03</span><div><h2>Ubicación</h2><p>Información visible y coordenadas opcionales.</p></div></div><div className="admin-form-grid"><TextField id="city" label="Ciudad *" value={values.city} onChange={(value) => set('city', value)} error={errors.city} /><TextField id="sector" label="Sector" value={values.sector} onChange={(value) => set('sector', value)} /><div className="admin-field full"><label htmlFor="address">Dirección</label><input id="address" value={values.address} onChange={(e) => set('address', e.target.value)} /></div><TextField id="latitude" label="Latitud" type="number" step="0.000001" value={values.latitude} onChange={(value) => set('latitude', value)} error={errors.latitude} /><TextField id="longitude" label="Longitud" type="number" step="0.000001" value={values.longitude} onChange={(value) => set('longitude', value)} error={errors.longitude} /></div></section>
+    <section className="form-section"><div className="form-section-head"><span>04</span><div><h2>Visibilidad y amenidades</h2><p>Controla cómo aparece la propiedad.</p></div></div><div className="toggle-row"><label><input type="checkbox" checked={values.published} onChange={(e) => set('published', e.target.checked)} /><span>Publicada</span></label><label><input type="checkbox" checked={values.featured} onChange={(e) => set('featured', e.target.checked)} /><span>Destacada</span></label></div><div className="amenity-checks">{amenities.map((amenity) => <label key={amenity.id}><input type="checkbox" checked={values.amenityIds.includes(amenity.id)} onChange={(e) => set('amenityIds', e.target.checked ? [...values.amenityIds, amenity.id] : values.amenityIds.filter((id) => id !== amenity.id))} />{amenity.name}</label>)}</div></section>
+    <section className="form-section"><div className="form-section-head"><span>05</span><div><h2>Fotografías</h2><p>JPEG, PNG, WebP o AVIF. Máximo 10 MB por archivo.</p></div></div><label className="image-drop"><ImagePlus /><strong>Seleccionar fotografías</strong><span>Puedes seleccionar varios archivos</span><input type="file" accept="image/jpeg,image/png,image/webp,image/avif" multiple onChange={chooseImages} /></label>
+      {!!images.length && <div className="image-manager">{images.map((image, index) => <article className="managed-image" key={image.id}><img src={image.url} alt={`Fotografía ${index + 1} de ${values.title}`} />{image.isCover && <span className="cover-label"><Star size={13} /> Portada</span>}<div className="image-actions"><button type="button" onClick={() => void moveImage(index, -1)} disabled={index === 0 || busy} aria-label="Mover imagen arriba"><ArrowUp /></button><button type="button" onClick={() => void moveImage(index, 1)} disabled={index === images.length - 1 || busy} aria-label="Mover imagen abajo"><ArrowDown /></button><button type="button" onClick={() => void makeCover(image.id)} disabled={image.isCover || busy} aria-label="Usar como portada"><Star /></button><button type="button" className="danger" onClick={() => void removeImage(image)} disabled={busy} aria-label="Eliminar imagen"><Trash2 /></button></div></article>)}</div>}
+      {!!pending.length && <><h3 className="pending-title">Pendientes de subir</h3><div className="image-manager">{pending.map((item, index) => <article className="managed-image" key={item.preview}><img src={item.preview} alt={`Nueva fotografía ${index + 1}`} /><button type="button" className="remove-pending" onClick={() => { URL.revokeObjectURL(item.preview); setPending((current) => current.filter((candidate) => candidate !== item)); }} aria-label="Quitar fotografía"><X /></button></article>)}</div></>}{uploadStatus && <p className="upload-status">{uploadStatus}</p>}
+    </section>
+    <section className="form-section"><div className="form-section-head"><span>06</span><div><h2>Video de la propiedad</h2><p>Añade un recorrido en video opcional para mostrar mejor la propiedad.</p></div></div>
+      <label className="video-picker"><span><strong>Video MP4</strong><small>Máximo 200 MB · Recomendado: 1080p / H.264</small></span><span className="button outline dark">Seleccionar video</span><input type="file" accept="video/mp4,.mp4" onChange={chooseVideo} /></label>
+      {(pendingVideo?.preview || videoUrl) && <div className="admin-video-preview"><video controls playsInline preload="metadata" src={pendingVideo?.preview ?? videoUrl} aria-label={`Recorrido en video de ${values.title || 'la propiedad'}`}>Tu navegador no puede reproducir este video.</video><div><strong>{pendingVideo ? 'Nuevo video pendiente de guardar' : 'Video actual'}</strong>{pendingVideo ? <button type="button" className="text-button" onClick={() => { URL.revokeObjectURL(pendingVideo.preview); setPendingVideo(null); }}>Cancelar reemplazo</button> : initial && videoStoragePath ? <button type="button" className="text-button danger-text" disabled={busy} onClick={() => setConfirmAction('video')}>Eliminar video</button> : null}</div></div>}
+    </section>
+    <div className="form-actions"><div>{initial && <><button type="button" className="button danger-button" disabled={busy} onClick={() => setConfirmAction('delete')}>Eliminar</button><button type="button" className="button outline dark" disabled={busy} onClick={() => setConfirmAction('archive')}>Archivar</button></>}</div><div><a className="button outline dark" href="/admin/properties">Cancelar</a>{initial?.published && <a className="button outline dark" href={`/propiedad/${initial.slug}`} target="_blank" rel="noreferrer"><Eye size={16} /> Ver propiedad</a>}<button type="button" className="button outline dark" disabled={busy} onClick={() => void save(initial ? undefined : 'draft')}>{busy ? 'Guardando…' : initial ? 'Guardar cambios' : 'Guardar borrador'}</button><button type="button" className="button" disabled={busy} onClick={() => void save('publish')}>{busy ? 'Publicando…' : initial ? 'Guardar y publicar' : 'Publicar propiedad'}</button></div></div>
+    {confirmAction && <div className="modal-backdrop" role="presentation"><div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><h2 id="confirm-title">{confirmAction === 'delete' ? '¿Eliminar esta propiedad?' : confirmAction === 'archive' ? '¿Archivar esta propiedad?' : confirmAction === 'video' ? '¿Eliminar el video?' : 'Esta propiedad no tiene fotografías'}</h2><p>{confirmAction === 'delete' ? 'Esta acción eliminará también sus imágenes, video y relaciones. No se puede deshacer.' : confirmAction === 'archive' ? 'La propiedad quedará inactiva y dejará de mostrarse públicamente. El video se conservará.' : confirmAction === 'video' ? 'El archivo se eliminará definitivamente de Storage y desaparecerá del detalle público.' : 'Puedes publicarla sin fotografías y añadirlas posteriormente.'}</p><div><button type="button" className="button outline dark" onClick={() => setConfirmAction(null)}>Cancelar</button><button type="button" className={`button ${confirmAction === 'delete' || confirmAction === 'video' ? 'danger-button' : ''}`} onClick={() => confirmAction === 'publish' ? void save('publish') : void destructiveAction()}>{confirmAction === 'delete' ? 'Eliminar propiedad' : confirmAction === 'archive' ? 'Archivar propiedad' : confirmAction === 'video' ? 'Eliminar video' : 'Publicar de todas formas'}</button></div></div></div>}
+  </form>;
+}
