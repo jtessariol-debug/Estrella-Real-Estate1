@@ -20,7 +20,8 @@ Sin variables de Supabase, el modo de desarrollo utiliza propiedades demo. Los b
 2. Abre **SQL Editor** y ejecuta las migraciones, en orden:
    - [`supabase/migrations/202608200001_initial_real_estate.sql`](supabase/migrations/202608200001_initial_real_estate.sql)
    - [`supabase/migrations/202608200002_add_property_video.sql`](supabase/migrations/202608200002_add_property_video.sql)
-3. Confirma en **Storage** que existan los buckets privados `property-images` y `property-videos`. El segundo admite un MP4 de hasta 200 MB por propiedad. El frontend genera URLs firmadas después de que RLS autoriza cada archivo.
+   - [`supabase/migrations/202608270001_allow_mov_property_videos.sql`](supabase/migrations/202608270001_allow_mov_property_videos.sql)
+3. Confirma en **Storage** que existan los buckets privados `property-images` y `property-videos`. El segundo admite un MP4 o MOV de hasta 200 MB por propiedad. El frontend genera URLs firmadas después de que RLS autoriza cada archivo.
 4. En **Project Settings > API**, copia la URL del proyecto y la clave pública `anon`. No utilices `service_role` en el navegador.
 5. Crea `.env.local` a partir de `.env.example`:
 
@@ -51,7 +52,9 @@ Los usuarios adicionales deben crearse primero en Supabase Auth y después recib
 - Solo perfiles autenticados `admin` o `editor` pueden administrar propiedades, imágenes y amenidades.
 - Solo `admin` puede administrar perfiles ajenos.
 - El bucket acepta escritura únicamente de `admin` y `editor` autenticados.
-- `properties.video_storage_path` guarda el path persistente del MP4; las URLs firmadas nunca se almacenan en la base de datos.
+- `properties.video_storage_path` guarda el path persistente del MP4 o MOV; las URLs firmadas nunca se almacenan en la base de datos.
+
+Los MP4 ofrecen la mayor compatibilidad web. Los MOV se aceptan y almacenan con `video/quicktime` —incluidos archivos transferidos desde iPhone—, pero su reproducción depende del codec y del navegador; no se garantiza que todos los MOV funcionen en Chrome o Android.
 
 ## Comandos
 

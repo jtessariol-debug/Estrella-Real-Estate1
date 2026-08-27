@@ -140,7 +140,9 @@ export async function uploadPropertyImage(propertyId: string, file: File, positi
 const MAX_VIDEO_SIZE = 200 * 1024 * 1024;
 
 function validateVideo(file: File): void {
-  if (file.type !== 'video/mp4' && !file.name.toLowerCase().endsWith('.mp4')) throw new Error('Solo puedes subir videos MP4.');
+  const extension = file.name.toLowerCase().match(/\.(mp4|mov)$/)?.[1];
+  const mimeAllowed = !file.type || file.type === 'video/mp4' || file.type === 'video/quicktime';
+  if (!extension || !mimeAllowed) throw new Error('Solo puedes subir videos MP4 o MOV.');
   if (file.size > MAX_VIDEO_SIZE) throw new Error('El video supera el límite máximo permitido de 200 MB.');
 }
 
@@ -152,10 +154,12 @@ export async function getPropertyVideoSignedUrl(storagePath: string): Promise<st
 
 export async function uploadPropertyVideo(propertyId: string, file: File, previousPath?: string): Promise<{ storagePath: string; signedUrl: string }> {
   validateVideo(file);
+  const extension = file.name.toLowerCase().endsWith('.mov') ? 'mov' : 'mp4';
+  const contentType = extension === 'mov' ? 'video/quicktime' : 'video/mp4';
   const base = sanitizeFileName(file.name.replace(/\.[^.]+$/, '')) || 'property-tour';
-  const path = `properties/${propertyId}/${Date.now()}-${crypto.randomUUID()}-${base}.mp4`;
+  const path = `properties/${propertyId}/${Date.now()}-${crypto.randomUUID()}-${base}.${extension}`;
   const storage = requireSupabase().storage.from('property-videos');
-  const uploaded = await storage.upload(path, file, { cacheControl: '3600', upsert: false, contentType: 'video/mp4' });
+  const uploaded = await storage.upload(path, file, { cacheControl: '3600', upsert: false, contentType });
   if (uploaded.error) throw adminError(uploaded.error, 'No pudimos subir el video.');
   const updated = await requireSupabase().from('properties').update({ video_storage_path: path }).eq('id', propertyId);
   if (updated.error) { await storage.remove([path]); throw adminError(updated.error, 'El video se subió, pero no pudimos asociarlo a la propiedad.'); }
