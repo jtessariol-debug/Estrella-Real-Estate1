@@ -21,8 +21,8 @@ button{cursor:pointer}
 .header.scrolled,.header.inner{background:rgba(247,246,242,.96);color:var(--ink);box-shadow:0 1px 0 var(--line);backdrop-filter:blur(14px)}
 .nav{height:88px;display:flex;align-items:center;justify-content:space-between}
 .logo{display:flex;align-items:center;gap:12px;z-index:2}
-.logo img{width:64px;height:54px;object-fit:cover}
-.logo span{font:600 1.05rem 'Playfair Display',serif;letter-spacing:.06em}
+.brand-logo{position:relative;display:block;flex:0 0 auto;width:150px;height:80px;overflow:hidden;background:#fff}
+.brand-logo img{position:absolute;top:50%;left:50%;display:block;width:142%;max-width:none;height:auto;transform:translate(-50%,-50%)}
 .nav-links{display:flex;align-items:center;gap:27px;font-size:.78rem}
 .nav-links>a:not(.button){position:relative}
 .nav-links>a:not(.button):after{content:'';position:absolute;left:0;right:100%;bottom:-8px;height:1px;background:var(--gold);transition:.25s}
@@ -128,8 +128,7 @@ button{cursor:pointer}
 @media(max-width:760px){.container{width:min(100% - 30px,1180px)}
 .section{padding:72px 0}
 .nav{height:74px}
-.logo img{width:52px;height:44px}
-.logo span{font-size:.9rem}
+.brand-logo-header{width:118px;height:62px}
 .menu-toggle{display:block}
 .nav-links{position:fixed;inset:0;background:#11110f;color:white;display:flex;flex-direction:column;justify-content:center;gap:28px;font:500 1.7rem 'Playfair Display',serif;transform:translateX(100%);transition:.35s}
 .nav-links.open{transform:none}

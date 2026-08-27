@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Menu, X } from 'lucide-react';
 import { COMPANY_INFO } from '../constants';
+import BrandLogo from './BrandLogo';
 
 const links = [
   ['Inicio', '/'], ['Propiedades', '/propiedades'], ['Venta', '/propiedades/venta'],
@@ -20,8 +21,7 @@ export default function Header({ inner = false }: { inner?: boolean }) {
   return <header className={`header ${inner ? 'inner' : ''} ${scrolled ? 'scrolled' : ''}`}>
     <div className="container nav">
       <a className="logo" href="/" aria-label="Estrella Real Estate, inicio">
-        <img src={COMPANY_INFO.logoUrl} alt="Logo de Estrella Real Estate" />
-        <span>ESTRELLA REAL ESTATE</span>
+        <BrandLogo className="brand-logo-header" />
       </a>
       <nav className={`nav-links ${open ? 'open' : ''}`} aria-label="Navegación principal">
         {links.map(([label, href]) => <a key={href} href={href} onClick={() => setOpen(false)}>{label}</a>)}
