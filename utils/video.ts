@@ -1,4 +1,4 @@
-export const VIDEO_MAX_SIZE_BYTES = 200 * 1024 * 1024;
+export const VIDEO_MAX_SIZE_BYTES = 50 * 1024 * 1024;
 
 export type PropertyVideoExtension = 'mp4' | 'mov';
 
@@ -18,7 +18,7 @@ export const getVideoContentType = (extension: PropertyVideoExtension) =>
 export function validatePropertyVideo(file: Pick<File, 'name' | 'size'>): PropertyVideoExtension {
   const extension = getVideoExtension(file.name);
   if (!extension) throw new Error('Solo puedes subir videos MP4 o MOV.');
-  if (file.size > VIDEO_MAX_SIZE_BYTES) throw new Error('El video supera el límite máximo configurado de 200 MB.');
+  if (file.size > VIDEO_MAX_SIZE_BYTES) throw new Error('El video supera el límite máximo configurado de 50 MB.');
   return extension;
 }
 
