@@ -152,7 +152,7 @@ export async function getPropertyVideoSignedUrl(storagePath: string): Promise<st
   return data.signedUrl;
 }
 
-export async function uploadPropertyVideo(propertyId: string, file: File, previousPath?: string): Promise<{ storagePath: string; signedUrl: string }> {
+export async function uploadPropertyVideo(propertyId: string, file: File, previousPath?: string): Promise<{ storagePath: string; signedUrl: string; cleanupWarning?: string }> {
   validateVideo(file);
   const extension = file.name.toLowerCase().endsWith('.mov') ? 'mov' : 'mp4';
   const contentType = extension === 'mov' ? 'video/quicktime' : 'video/mp4';
@@ -161,13 +161,21 @@ export async function uploadPropertyVideo(propertyId: string, file: File, previo
   const storage = requireSupabase().storage.from('property-videos');
   const uploaded = await storage.upload(path, file, { cacheControl: '3600', upsert: false, contentType });
   if (uploaded.error) throw adminError(uploaded.error, 'No pudimos subir el video.');
-  const updated = await requireSupabase().from('properties').update({ video_storage_path: path }).eq('id', propertyId);
-  if (updated.error) { await storage.remove([path]); throw adminError(updated.error, 'El video se subió, pero no pudimos asociarlo a la propiedad.'); }
+  let signedUrl: string;
+  try {
+    signedUrl = await getPropertyVideoSignedUrl(path);
+  } catch (reason) {
+    await storage.remove([path]);
+    throw reason;
+  }
+  const updated = await requireSupabase().from('properties').update({ video_storage_path: path }).eq('id', propertyId).select('id').maybeSingle();
+  if (updated.error || !updated.data) { await storage.remove([path]); throw adminError(updated.error ?? new Error('No se encontró la propiedad.'), 'El video se subió, pero no pudimos asociarlo a la propiedad.'); }
+  let cleanupWarning: string | undefined;
   if (previousPath && previousPath !== path) {
     const removed = await storage.remove([previousPath]);
-    if (removed.error) throw adminError(removed.error, 'El nuevo video quedó guardado, pero no pudimos eliminar el archivo anterior de Storage.');
+    if (removed.error) cleanupWarning = 'El nuevo video quedó asociado correctamente, pero el archivo anterior no pudo limpiarse de Storage.';
   }
-  return { storagePath: path, signedUrl: await getPropertyVideoSignedUrl(path) };
+  return { storagePath: path, signedUrl, cleanupWarning };
 }
 
 export async function replacePropertyVideo(propertyId: string, oldPath: string, newFile: File) {
@@ -176,10 +184,14 @@ export async function replacePropertyVideo(propertyId: string, oldPath: string, 
 
 export async function deletePropertyVideo(propertyId: string, storagePath: string): Promise<void> {
   const storage = requireSupabase().storage.from('property-videos');
+  const client = requireSupabase();
+  const updated = await client.from('properties').update({ video_storage_path: null }).eq('id', propertyId).eq('video_storage_path', storagePath).select('id').maybeSingle();
+  if (updated.error || !updated.data) throw adminError(updated.error ?? new Error('No se encontró el video asociado.'), 'No pudimos desvincular el video de la propiedad. No se eliminó ningún archivo.');
   const removed = await storage.remove([storagePath]);
-  if (removed.error) throw adminError(removed.error, 'No pudimos eliminar el video de Storage.');
-  const updated = await requireSupabase().from('properties').update({ video_storage_path: null }).eq('id', propertyId);
-  if (updated.error) throw adminError(updated.error, 'El archivo se eliminó, pero no pudimos limpiar el video de la propiedad.');
+  if (!removed.error) return;
+  const restored = await client.from('properties').update({ video_storage_path: storagePath }).eq('id', propertyId).is('video_storage_path', null);
+  if (restored.error) throw adminError(restored.error, 'No pudimos eliminar el video y tampoco restaurar su referencia. Revisa la propiedad antes de continuar.');
+  throw adminError(removed.error, 'No pudimos eliminar el video de Storage. La propiedad conserva el video anterior.');
 }
 
 export async function setCoverImage(propertyId: string, imageId: string): Promise<void> {
