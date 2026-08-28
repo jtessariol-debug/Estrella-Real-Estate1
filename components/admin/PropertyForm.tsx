@@ -4,6 +4,7 @@ import type { AdminProperty, AdminPropertyImage, Amenity, OperationType, Propert
 import { archiveProperty, createProperty, deleteProperty, deletePropertyImage, deletePropertyVideo, getAmenities, reorderPropertyImages, setCoverImage, setPropertyAmenities, updateProperty, uploadPropertyImage, uploadPropertyVideo } from '../../services/admin';
 import { slugify } from '../../utils/slug';
 import { formatPriceInput, normalizePriceInput } from '../../utils/format';
+import { getVideoContentType, getVideoExtension, validatePropertyVideo } from '../../utils/video';
 
 type FormValues = {
   title: string; slug: string; description: string; price: string; currency: 'DOP' | 'USD';
@@ -14,7 +15,7 @@ type FormValues = {
 };
 type Errors = Partial<Record<keyof FormValues, string>>;
 type PendingImage = { file: File; preview: string };
-const videoMimeType = (name?: string) => name?.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4';
+const videoMimeType = (name?: string) => getVideoContentType(getVideoExtension(name ?? '') ?? 'mp4');
 
 const EMPTY_VALUES: FormValues = { title: '', slug: '', description: '', price: '', currency: 'DOP', operationType: 'sale', propertyType: 'apartment', status: 'draft', bedrooms: '', bathrooms: '', parkingSpaces: '', areaM2: '', city: 'Santiago', sector: '', address: '', latitude: '', longitude: '', published: false, featured: false, amenityIds: [] };
 const STATUS_LABELS: Record<PropertyStatus, string> = { draft: 'Borrador', available: 'Disponible', reserved: 'Reservada', sold: 'Vendida', rented: 'Alquilada', inactive: 'Inactiva' };
@@ -72,10 +73,7 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
 
   const chooseVideo = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
-    const extension = file.name.toLowerCase().match(/\.(mp4|mov)$/)?.[1];
-    const mimeAllowed = !file.type || file.type === 'video/mp4' || file.type === 'video/quicktime';
-    if (!extension || !mimeAllowed) { setNotice('Solo puedes subir videos MP4 o MOV.'); return; }
-    if (file.size > 200 * 1024 * 1024) { setNotice('El video supera el límite máximo permitido de 200 MB.'); return; }
+    try { validatePropertyVideo(file); } catch (reason) { setNotice(reason instanceof Error ? reason.message : 'Solo puedes subir videos MP4 o MOV.'); return; }
     if (pendingVideo) URL.revokeObjectURL(pendingVideo.preview);
     setVideoPlaybackWarning(false); setVideoDimensions({ width: 9, height: 16 });
     setPendingVideo({ file, preview: URL.createObjectURL(file) });

@@ -1,5 +1,6 @@
 import { requireSupabase } from '../lib/supabase';
 import type { AdminProperty, AdminPropertyImage, Amenity, PropertyInput, PropertyStatus, PropertyType } from '../types';
+import { getStorageErrorDiagnostic, getVideoContentType, getVideoUploadErrorMessage, validatePropertyVideo } from '../utils/video';
 
 export type AdminPropertySummary = {
   id: string; title: string; slug: string; price: number; currency: 'DOP' | 'USD';
@@ -137,15 +138,6 @@ export async function uploadPropertyImage(propertyId: string, file: File, positi
   if (inserted.error) { await storage.remove([path]); throw adminError(inserted.error, `La imagen ${file.name} se subió, pero no pudimos registrarla.`); }
 }
 
-const MAX_VIDEO_SIZE = 200 * 1024 * 1024;
-
-function validateVideo(file: File): void {
-  const extension = file.name.toLowerCase().match(/\.(mp4|mov)$/)?.[1];
-  const mimeAllowed = !file.type || file.type === 'video/mp4' || file.type === 'video/quicktime';
-  if (!extension || !mimeAllowed) throw new Error('Solo puedes subir videos MP4 o MOV.');
-  if (file.size > MAX_VIDEO_SIZE) throw new Error('El video supera el límite máximo permitido de 200 MB.');
-}
-
 export async function getPropertyVideoSignedUrl(storagePath: string): Promise<string> {
   const { data, error } = await requireSupabase().storage.from('property-videos').createSignedUrl(storagePath, 3600);
   if (error) throw adminError(error, 'No pudimos cargar el video de la propiedad.');
@@ -153,14 +145,17 @@ export async function getPropertyVideoSignedUrl(storagePath: string): Promise<st
 }
 
 export async function uploadPropertyVideo(propertyId: string, file: File, previousPath?: string): Promise<{ storagePath: string; signedUrl: string; cleanupWarning?: string }> {
-  validateVideo(file);
-  const extension = file.name.toLowerCase().endsWith('.mov') ? 'mov' : 'mp4';
-  const contentType = extension === 'mov' ? 'video/quicktime' : 'video/mp4';
+  const extension = validatePropertyVideo(file);
+  const contentType = getVideoContentType(extension);
   const base = sanitizeFileName(file.name.replace(/\.[^.]+$/, '')) || 'property-tour';
   const path = `properties/${propertyId}/${Date.now()}-${crypto.randomUUID()}-${base}.${extension}`;
   const storage = requireSupabase().storage.from('property-videos');
   const uploaded = await storage.upload(path, file, { cacheControl: '3600', upsert: false, contentType });
-  if (uploaded.error) throw adminError(uploaded.error, 'No pudimos subir el video.');
+  if (uploaded.error) {
+    const diagnostic = getStorageErrorDiagnostic(uploaded.error);
+    console.error('Supabase property video upload failed', { bucket: 'property-videos', path, contentType, ...diagnostic });
+    throw new Error(getVideoUploadErrorMessage(diagnostic, extension));
+  }
   let signedUrl: string;
   try {
     signedUrl = await getPropertyVideoSignedUrl(path);
