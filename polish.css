@@ -261,3 +261,14 @@ body{color:var(--color-text);background:var(--color-bg);font-size:16px;line-heig
 .agent-actions{flex-direction:column}
 .agent-actions .button{flex:auto;width:100%}
 }
+
+/* Keep the mobile opening focused while revealing the search experience below. */
+@media(max-width:600px){
+.hero{height:auto;min-height:clamp(535px,70svh,590px);min-height:clamp(535px,70dvh,590px);padding:calc(92px + env(safe-area-inset-top)) 0 40px}
+.hero-content{padding-top:0}
+.hero h1{font-size:clamp(2.4rem,10.4vw,2.8rem);line-height:1.02;margin:13px 0 16px}
+.hero p{font-size:.95rem;line-height:1.5}
+.hero-actions{gap:9px;margin-top:21px}
+.hero-actions .button{min-height:46px}
+.search-wrap,.listing-hero+.search-wrap{padding:8px 0 12px}
+}
