@@ -21,7 +21,7 @@ export default function Header({ inner = false }: { inner?: boolean }) {
   return <header className={`header ${inner ? 'inner' : ''} ${scrolled ? 'scrolled' : ''}`}>
     <div className="container nav">
       <a className="logo" href="/" aria-label="Estrella Real Estate, inicio">
-        <BrandLogo className="brand-logo-header" />
+        <BrandLogo className="brand-logo-header" transparent />
       </a>
       <nav className={`nav-links ${open ? 'open' : ''}`} aria-label="Navegación principal">
         {links.map(([label, href]) => <a key={href} href={href} onClick={() => setOpen(false)}>{label}</a>)}
