@@ -279,3 +279,32 @@ body{color:var(--color-text);background:var(--color-bg);font-size:16px;line-heig
 @media(max-width:760px){
 .brand-logo.brand-logo-transparent{width:clamp(170px,46vw,194px);height:auto;transform:translateY(19px)}
 }
+
+/* Home-only compact mobile search; desktop keeps the full inline filter set. */
+.search-mobile-heading,.search-more-toggle,.search-label-mobile,.search-type-label-mobile{display:none}
+.search-advanced{display:contents}
+@media(max-width:600px){
+.hero{min-height:0;height:auto;align-items:flex-start;padding:calc(114px + env(safe-area-inset-top)) 0 22px}
+.hero h1{font-size:clamp(2.2rem,9.7vw,2.55rem);line-height:1;margin:9px 0 10px}
+.hero p{max-width:360px;margin:0;font-size:.88rem;line-height:1.42}
+.hero-actions{gap:7px;margin-top:16px}
+.hero-actions .button{min-height:44px;padding-inline:18px}
+.home-search-wrap{margin-top:-14px;padding:0 0 12px;background:linear-gradient(to bottom,transparent 0 14px,var(--color-bg) 14px)}
+.home-search-panel{grid-template-columns:1fr;padding:14px 14px 12px;border:1px solid rgba(23,23,20,.08);box-shadow:0 14px 36px rgba(25,23,18,.12);gap:0}
+.home-search-panel .search-mobile-heading{display:flex;flex-direction:column;padding:2px 4px 10px;border-bottom:1px solid var(--color-border)}
+.search-mobile-heading span{font:500 1.28rem/1.2 'Playfair Display',serif;color:var(--color-text)}
+.search-mobile-heading small{margin-top:2px;color:var(--color-muted);font-size:.72rem}
+.home-search-panel>.field,.home-search-panel .search-advanced>.field{padding:7px 4px 8px;border-right:0;border-bottom:1px solid var(--color-border)}
+.home-search-panel .field label{margin-bottom:3px;font-size:.62rem}
+.home-search-panel .field input,.home-search-panel .field select{min-height:25px;font-size:.87rem}
+.home-search-panel .search-more-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:0 4px;border:0;border-bottom:1px solid var(--color-border);background:transparent;color:#625f57;font-size:.7rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase}
+.search-more-toggle svg{transition:transform .2s ease}
+.search-more-toggle[aria-expanded=true] svg{transform:rotate(180deg)}
+.home-search-panel .search-advanced{display:none}
+.home-search-panel .search-advanced.open{display:grid;grid-template-columns:1fr}
+.home-search-panel>.button{min-height:44px;margin-top:10px}
+.home-search-panel .search-label-desktop{display:none}
+.home-search-panel .search-label-mobile{display:inline}
+.home-search-panel .search-type-label-desktop{display:none}
+.home-search-panel .search-type-label-mobile{display:inline}
+}
