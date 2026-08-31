@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mux/mux-player-react": "^3.13.2",
+    "@mux/upchunk": "^3.5.0",
     "@supabase/supabase-js": "^2.112.3",
     "lucide-react": "^0.562.0",
     "react": "^19.2.3",

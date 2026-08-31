@@ -1,5 +1,5 @@
 import { requireSupabase, isSupabaseConfigured } from '../lib/supabase';
-import type { OperationType, Property, PropertyFilters, PropertyImage, PropertyStatus, PropertyType } from '../types';
+import type { OperationType, Property, PropertyFilters, PropertyImage, PropertyStatus, PropertyType, VideoProvider, VideoStatus } from '../types';
 
 type PropertyQueryRow = {
   id: string; title: string; slug: string; description: string; price: number | string;
@@ -9,6 +9,8 @@ type PropertyQueryRow = {
   latitude: number | string | null; longitude: number | string | null; featured: boolean;
   published: boolean; status: PropertyStatus; created_at: string; updated_at: string;
   video_storage_path: string | null;
+  video_provider: VideoProvider | null; mux_asset_id: string | null; mux_playback_id: string | null;
+  video_status: VideoStatus | null; video_aspect_ratio: string | null;
   property_images: Array<{ id: string; storage_path: string; image_url: string | null; position: number; is_cover: boolean }> | null;
   property_amenities: Array<{ amenities: { name: string } | null }> | null;
 };
@@ -16,7 +18,8 @@ type PropertyQueryRow = {
 const PROPERTY_SELECT = `
   id, title, slug, description, price, currency, operation_type, property_type,
   bedrooms, bathrooms, parking_spaces, area_m2, city, sector, address, latitude,
-  longitude, featured, published, status, video_storage_path, created_at, updated_at,
+  longitude, featured, published, status, video_storage_path, video_provider, mux_asset_id,
+  mux_playback_id, video_status, video_aspect_ratio, created_at, updated_at,
   property_images (id, storage_path, image_url, position, is_cover),
   property_amenities (amenities (name))
 `;
@@ -36,7 +39,10 @@ export function mapSupabasePropertyToProperty(row: PropertyQueryRow): Property {
     bathrooms: optionalNumber(row.bathrooms), parkingSpaces: optionalNumber(row.parking_spaces),
     areaM2: optionalNumber(row.area_m2), city: row.city, sector: row.sector ?? undefined,
     address: row.address ?? undefined, latitude: optionalNumber(row.latitude), longitude: optionalNumber(row.longitude),
-    featured: row.featured, published: row.published, status: row.status, videoStoragePath: row.video_storage_path ?? undefined, images,
+    featured: row.featured, published: row.published, status: row.status, videoStoragePath: row.video_storage_path ?? undefined,
+    videoProvider: row.video_provider ?? (row.video_storage_path ? 'supabase' : undefined),
+    muxAssetId: row.mux_asset_id ?? undefined, muxPlaybackId: row.mux_playback_id ?? undefined,
+    videoStatus: row.video_status ?? undefined, videoAspectRatio: row.video_aspect_ratio ?? undefined, images,
     amenities: (row.property_amenities ?? []).flatMap((item) => item.amenities?.name ? [item.amenities.name] : []),
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
@@ -120,7 +126,7 @@ export async function getPropertyBySlug(slug: string): Promise<Property | undefi
   if (!data) return undefined;
   const [row] = await withSignedImageUrls([data as unknown as PropertyQueryRow]);
   const property = mapSupabasePropertyToProperty(row);
-  if (row.video_storage_path) property.videoUrl = await getSignedVideoUrl(row.video_storage_path);
+  if ((row.video_provider === 'supabase' || (!row.video_provider && row.video_storage_path)) && row.video_storage_path) property.videoUrl = await getSignedVideoUrl(row.video_storage_path);
   return property;
 }
 

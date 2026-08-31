@@ -22,6 +22,19 @@ export function validatePropertyVideo(file: Pick<File, 'name' | 'size'>): Proper
   return extension;
 }
 
+export function validateMuxSourceVideo(file: Pick<File, 'name' | 'size'>): PropertyVideoExtension {
+  const extension = getVideoExtension(file.name);
+  if (!extension) throw new Error('Solo puedes subir videos MP4 o MOV.');
+  if (file.size <= 0) throw new Error('El archivo de video está vacío.');
+  return extension;
+}
+
+export function parseVideoAspectRatio(value?: string): { width: number; height: number } {
+  const match = value?.match(/^([1-9]\d*):([1-9]\d*)$/);
+  if (!match) return { width: 9, height: 16 };
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
 export function getStorageErrorDiagnostic(error: unknown): StorageErrorDiagnostic {
   const record = error && typeof error === 'object' ? error as Record<string, unknown> : {};
   const message = error instanceof Error ? error.message : typeof record.message === 'string' ? record.message : String(error);

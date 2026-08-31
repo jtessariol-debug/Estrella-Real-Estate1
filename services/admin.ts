@@ -1,5 +1,6 @@
 import { requireSupabase } from '../lib/supabase';
-import type { AdminProperty, AdminPropertyImage, Amenity, PropertyInput, PropertyStatus, PropertyType } from '../types';
+import type { AdminProperty, AdminPropertyImage, Amenity, PropertyInput, PropertyStatus, PropertyType, VideoProvider, VideoStatus } from '../types';
+import { deleteHybridProperty } from './muxVideo';
 import { getStorageErrorDiagnostic, getVideoContentType, getVideoUploadErrorMessage, validatePropertyVideo } from '../utils/video';
 
 export type AdminPropertySummary = {
@@ -18,6 +19,8 @@ type AdminRow = {
   latitude: number | string | null; longitude: number | string | null; featured: boolean;
   published: boolean; status: PropertyStatus; created_at: string; updated_at: string;
   video_storage_path: string | null;
+  video_provider: VideoProvider | null; mux_asset_id: string | null; mux_playback_id: string | null;
+  video_status: VideoStatus | null; video_aspect_ratio: string | null;
   property_images: ImageRow[] | null; property_amenities: Array<{ amenity_id: string }> | null;
 };
 
@@ -80,13 +83,15 @@ export async function getAdminPropertyById(id: string): Promise<AdminProperty | 
   const { data, error } = await requireSupabase().from('properties').select(`
     id, title, slug, description, price, currency, operation_type, property_type, bedrooms, bathrooms,
     parking_spaces, area_m2, city, sector, address, latitude, longitude, featured, published, status,
-    video_storage_path, created_at, updated_at, property_images(id, storage_path, image_url, position, is_cover),
+    video_storage_path, video_provider, mux_asset_id, mux_playback_id, video_status, video_aspect_ratio,
+    created_at, updated_at, property_images(id, storage_path, image_url, position, is_cover),
     property_amenities(amenity_id)
   `).eq('id', id).order('position', { referencedTable: 'property_images', ascending: true }).maybeSingle();
   if (error) throw adminError(error, 'No pudimos cargar la propiedad.');
   if (!data) return undefined;
   const row = data as unknown as AdminRow;
-  return { id: row.id, title: row.title, slug: row.slug, description: row.description, price: Number(row.price), currency: row.currency, operationType: row.operation_type, propertyType: row.property_type, bedrooms: toOptionalNumber(row.bedrooms), bathrooms: toOptionalNumber(row.bathrooms), parkingSpaces: toOptionalNumber(row.parking_spaces), areaM2: toOptionalNumber(row.area_m2), city: row.city, sector: row.sector ?? undefined, address: row.address ?? undefined, latitude: toOptionalNumber(row.latitude), longitude: toOptionalNumber(row.longitude), featured: row.featured, published: row.published, status: row.status, videoStoragePath: row.video_storage_path ?? undefined, videoUrl: row.video_storage_path ? await getPropertyVideoSignedUrl(row.video_storage_path) : undefined, images: await signImageRows(row.property_images ?? []), amenityIds: (row.property_amenities ?? []).map((item) => item.amenity_id), createdAt: row.created_at, updatedAt: row.updated_at };
+  const videoProvider = row.video_provider ?? (row.video_storage_path ? 'supabase' : undefined);
+  return { id: row.id, title: row.title, slug: row.slug, description: row.description, price: Number(row.price), currency: row.currency, operationType: row.operation_type, propertyType: row.property_type, bedrooms: toOptionalNumber(row.bedrooms), bathrooms: toOptionalNumber(row.bathrooms), parkingSpaces: toOptionalNumber(row.parking_spaces), areaM2: toOptionalNumber(row.area_m2), city: row.city, sector: row.sector ?? undefined, address: row.address ?? undefined, latitude: toOptionalNumber(row.latitude), longitude: toOptionalNumber(row.longitude), featured: row.featured, published: row.published, status: row.status, videoStoragePath: row.video_storage_path ?? undefined, videoUrl: videoProvider === 'supabase' && row.video_storage_path ? await getPropertyVideoSignedUrl(row.video_storage_path) : undefined, videoProvider, muxAssetId: row.mux_asset_id ?? undefined, muxPlaybackId: row.mux_playback_id ?? undefined, videoStatus: row.video_status ?? undefined, videoAspectRatio: row.video_aspect_ratio ?? undefined, images: await signImageRows(row.property_images ?? []), amenityIds: (row.property_amenities ?? []).map((item) => item.amenity_id), createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 export async function createProperty(input: PropertyInput): Promise<string> {
@@ -163,7 +168,7 @@ export async function uploadPropertyVideo(propertyId: string, file: File, previo
     await storage.remove([path]);
     throw reason;
   }
-  const updated = await requireSupabase().from('properties').update({ video_storage_path: path }).eq('id', propertyId).select('id').maybeSingle();
+  const updated = await requireSupabase().from('properties').update({ video_storage_path: path, video_provider: 'supabase', mux_asset_id: null, mux_playback_id: null, video_status: 'ready', video_aspect_ratio: null }).eq('id', propertyId).select('id').maybeSingle();
   if (updated.error || !updated.data) { await storage.remove([path]); throw adminError(updated.error ?? new Error('No se encontró la propiedad.'), 'El video se subió, pero no pudimos asociarlo a la propiedad.'); }
   let cleanupWarning: string | undefined;
   if (previousPath && previousPath !== path) {
@@ -180,11 +185,11 @@ export async function replacePropertyVideo(propertyId: string, oldPath: string, 
 export async function deletePropertyVideo(propertyId: string, storagePath: string): Promise<void> {
   const storage = requireSupabase().storage.from('property-videos');
   const client = requireSupabase();
-  const updated = await client.from('properties').update({ video_storage_path: null }).eq('id', propertyId).eq('video_storage_path', storagePath).select('id').maybeSingle();
+  const updated = await client.from('properties').update({ video_storage_path: null, video_provider: null, video_status: null, video_aspect_ratio: null }).eq('id', propertyId).eq('video_storage_path', storagePath).select('id').maybeSingle();
   if (updated.error || !updated.data) throw adminError(updated.error ?? new Error('No se encontró el video asociado.'), 'No pudimos desvincular el video de la propiedad. No se eliminó ningún archivo.');
   const removed = await storage.remove([storagePath]);
   if (!removed.error) return;
-  const restored = await client.from('properties').update({ video_storage_path: storagePath }).eq('id', propertyId).is('video_storage_path', null);
+  const restored = await client.from('properties').update({ video_storage_path: storagePath, video_provider: 'supabase', video_status: 'ready' }).eq('id', propertyId).is('video_storage_path', null);
   if (restored.error) throw adminError(restored.error, 'No pudimos eliminar el video y tampoco restaurar su referencia. Revisa la propiedad antes de continuar.');
   throw adminError(removed.error, 'No pudimos eliminar el video de Storage. La propiedad conserva el video anterior.');
 }
@@ -222,23 +227,5 @@ export async function archiveProperty(id: string): Promise<void> {
 }
 
 export async function deleteProperty(id: string): Promise<void> {
-  const client = requireSupabase();
-  const [images, propertyResult] = await Promise.all([
-    client.from('property_images').select('storage_path').eq('property_id', id),
-    client.from('properties').select('video_storage_path').eq('id', id).maybeSingle(),
-  ]);
-  if (images.error) throw adminError(images.error, 'No pudimos preparar la eliminación.');
-  if (propertyResult.error) throw adminError(propertyResult.error, 'No pudimos comprobar el video de la propiedad.');
-  const paths = ((images.data ?? []) as Array<{ storage_path: string }>).map((image) => image.storage_path);
-  if (paths.length) {
-    const removed = await client.storage.from('property-images').remove(paths);
-    if (removed.error) throw adminError(removed.error, 'No pudimos eliminar los archivos. La propiedad no fue eliminada.');
-  }
-  const videoPath = (propertyResult.data as { video_storage_path: string | null } | null)?.video_storage_path;
-  if (videoPath) {
-    const removedVideo = await client.storage.from('property-videos').remove([videoPath]);
-    if (removedVideo.error) throw adminError(removedVideo.error, 'Las imágenes se eliminaron, pero no pudimos borrar el video. La propiedad se conserva para revisión.');
-  }
-  const deleted = await client.from('properties').delete().eq('id', id);
-  if (deleted.error) throw adminError(deleted.error, 'Los archivos se eliminaron, pero no pudimos borrar la propiedad. Revisa el catálogo.');
+  await deleteHybridProperty(id);
 }

@@ -5,6 +5,8 @@ export type PropertyType = 'apartment' | 'house' | 'villa' | 'penthouse' | 'land
 export type PropertyImage = { id: string; url: string; position: number; isCover: boolean };
 
 export type PropertyStatus = 'draft' | 'available' | 'reserved' | 'sold' | 'rented' | 'inactive';
+export type VideoProvider = 'supabase' | 'mux';
+export type VideoStatus = 'processing' | 'ready' | 'error';
 
 export type Property = {
   id: string;
@@ -29,6 +31,11 @@ export type Property = {
   status: PropertyStatus;
   videoStoragePath?: string;
   videoUrl?: string;
+  videoProvider?: VideoProvider;
+  muxAssetId?: string;
+  muxPlaybackId?: string;
+  videoStatus?: VideoStatus;
+  videoAspectRatio?: string;
   images: PropertyImage[];
   amenities?: string[];
   createdAt?: string;

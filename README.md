@@ -21,6 +21,9 @@ Sin variables de Supabase, el modo de desarrollo utiliza propiedades demo. Los b
    - [`supabase/migrations/202608200001_initial_real_estate.sql`](supabase/migrations/202608200001_initial_real_estate.sql)
    - [`supabase/migrations/202608200002_add_property_video.sql`](supabase/migrations/202608200002_add_property_video.sql)
    - [`supabase/migrations/202608270001_allow_mov_property_videos.sql`](supabase/migrations/202608270001_allow_mov_property_videos.sql)
+   - [`supabase/migrations/202608270002_enforce_property_video_bucket_config.sql`](supabase/migrations/202608270002_enforce_property_video_bucket_config.sql)
+   - [`supabase/migrations/202608280001_limit_property_videos_to_50mb.sql`](supabase/migrations/202608280001_limit_property_videos_to_50mb.sql)
+   - [`supabase/migrations/202608310001_add_mux_hybrid_video.sql`](supabase/migrations/202608310001_add_mux_hybrid_video.sql)
 3. Confirma en **Storage** que existan los buckets privados `property-images` y `property-videos`. El segundo admite un MP4 o MOV de hasta 50 MB por propiedad, alineado con Supabase Free. El frontend genera URLs firmadas después de que RLS autoriza cada archivo.
 4. En **Project Settings > API**, copia la URL del proyecto y la clave pública `anon`. No utilices `service_role` en el navegador.
 5. Crea `.env.local` a partir de `.env.example`:
@@ -55,6 +58,24 @@ Los usuarios adicionales deben crearse primero en Supabase Auth y después recib
 - `properties.video_storage_path` guarda el path persistente del MP4 o MOV; las URLs firmadas nunca se almacenan en la base de datos.
 
 Los MP4 ofrecen la mayor compatibilidad web. Los MOV se aceptan y almacenan con `video/quicktime` —incluidos archivos transferidos desde iPhone—, pero su reproducción depende del codec y del navegador; no se garantiza que todos los MOV funcionen en Chrome o Android.
+
+## Video híbrido con Mux
+
+- MP4/MOV de hasta 50 MB conservan el flujo privado de Supabase Storage.
+- MP4/MOV mayores de 50 MB usan Mux Direct Upload desde el navegador. El archivo nunca pasa por una función de Vercel.
+- Mux procesa el archivo y entrega HLS con un playback ID firmado. El video anterior permanece activo hasta recibir `video.asset.ready`.
+- `property_video_jobs` conserva el trabajo pendiente; `complete_property_mux_video_job` activa el nuevo asset de forma transaccional e idempotente.
+
+Configuración manual requerida antes de desplegar:
+
+1. Ejecutar la migración `202608310001_add_mux_hybrid_video.sql` en Supabase SQL Editor.
+2. Crear en Mux un access token con permisos de lectura/escritura para Video.
+3. Crear una signing key de Mux y conservar su ID y private key codificada en base64.
+4. Crear un webhook para `https://TU_DOMINIO/api/mux/webhook` y guardar el signing secret mostrado una sola vez.
+5. Definir en Vercel las variables server-only indicadas en `.env.example`. Nunca deben llevar el prefijo `VITE_`.
+6. Definir `APP_ORIGIN` con el origen exacto de producción, sin barra final, para limitar CORS del Direct Upload.
+
+Eventos utilizados: `video.upload.asset_created`, `video.asset.ready`, `video.asset.errored` y `video.asset.deleted`.
 
 ## Comandos
 
