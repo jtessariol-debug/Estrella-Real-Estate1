@@ -13,15 +13,49 @@ export function getSupabaseAdmin(): SupabaseClient {
   return cachedClient;
 }
 
-export async function requireStaff(request: IncomingMessage): Promise<User> {
+const partialUserId = (id?: string) => id ? `${id.slice(0, 8)}…` : undefined;
+
+export async function requireStaff(request: IncomingMessage, endpoint = request.url?.split('?')[0] ?? 'unknown'): Promise<User> {
   const token = bearerToken(request);
-  if (!token) throw Object.assign(new Error('Debes iniciar sesión nuevamente.'), { statusCode: 401 });
+  if (!token) {
+    console.warn('[STAFF AUTH]', { endpoint, authenticated: false, profileFound: false, authorization: 'denied', status: 401 });
+    throw Object.assign(new Error('Debes iniciar sesión nuevamente.'), { statusCode: 401, code: 'session_missing' });
+  }
   const client = getSupabaseAdmin();
   const { data, error } = await client.auth.getUser(token);
-  if (error || !data.user) throw Object.assign(new Error('La sesión no es válida.'), { statusCode: 401 });
+  if (error || !data.user) {
+    console.warn('[STAFF AUTH]', { endpoint, authenticated: false, profileFound: false, authorization: 'denied', status: 401, authError: error?.code });
+    throw Object.assign(new Error('La sesión no es válida.'), { statusCode: 401, code: 'session_invalid' });
+  }
   const profile = await client.from('profiles').select('role').eq('id', data.user.id).maybeSingle();
-  if (profile.error || !profile.data || !['admin', 'editor'].includes(String(profile.data.role))) {
-    throw Object.assign(new Error('No tienes permisos para administrar videos.'), { statusCode: 403 });
+  if (profile.error) {
+    console.error('[STAFF AUTH]', {
+      endpoint,
+      userId: partialUserId(data.user.id),
+      authenticated: true,
+      profileFound: false,
+      authorization: 'error',
+      status: 500,
+      databaseError: profile.error.code,
+    });
+    throw Object.assign(new Error('No se pudo verificar el perfil administrativo.'), { statusCode: 500, code: 'access_verification_failed' });
+  }
+  const role = profile.data?.role ? String(profile.data.role) : undefined;
+  const allowed = Boolean(profile.data && role && ['admin', 'editor'].includes(role));
+  console.info('[STAFF AUTH]', {
+    endpoint,
+    userId: partialUserId(data.user.id),
+    authenticated: true,
+    profileFound: Boolean(profile.data),
+    role,
+    authorization: allowed ? 'allowed' : 'denied',
+    status: allowed ? 200 : 403,
+  });
+  if (!allowed) {
+    throw Object.assign(new Error('No tienes permisos para administrar videos.'), {
+      statusCode: 403,
+      code: profile.data ? 'staff_role_required' : 'profile_missing',
+    });
   }
   return data.user;
 }
