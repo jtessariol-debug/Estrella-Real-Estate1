@@ -68,6 +68,8 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
   const [slugTouched, setSlugTouched] = useState(Boolean(initial)); const [confirmAction, setConfirmAction] = useState<'delete' | 'archive' | 'publish' | 'video' | null>(null);
   const [muxJob, setMuxJob] = useState<MuxVideoJob>();
   const [muxProgress, setMuxProgress] = useState(0);
+  const [savedPropertyId, setSavedPropertyId] = useState<string | undefined>(initial?.id);
+  const [muxRetryAvailable, setMuxRetryAvailable] = useState(false);
   const muxUploadRef = useRef<UpChunk | undefined>(undefined);
   const muxJobIdRef = useRef<string | undefined>(undefined);
   const muxObservedActiveRef = useRef(false);
@@ -109,6 +111,7 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
     setVideoPlaybackWarning(false); setVideoDimensions({ width: 9, height: 16 });
     const isLarge = file.size > VIDEO_MAX_SIZE_BYTES;
     setPendingVideo({ file, preview: isLarge ? undefined : URL.createObjectURL(file), isLarge });
+    setMuxRetryAvailable(false); setUploadStatus(''); setMuxProgress(0);
     setNotice(isLarge ? `Este video pesa ${formatFileSize(file.size)} y supera los 50 MB. Será optimizado automáticamente para reproducción web.` : null);
   };
 
@@ -118,53 +121,100 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
     return { title: values.title, slug: values.slug, description: values.description, price: Number(values.price), currency: values.currency, operationType: values.operationType, propertyType: values.propertyType, status, bedrooms: optionalNumber(values.bedrooms), bathrooms: optionalNumber(values.bathrooms), parkingSpaces: optionalNumber(values.parkingSpaces), areaM2: optionalNumber(values.areaM2), city: values.city, sector: values.sector || undefined, address: values.address || undefined, latitude: optionalNumber(values.latitude), longitude: optionalNumber(values.longitude), published, featured: values.featured };
   };
 
+  const uploadLargeVideo = async (propertyId: string, selectedVideo: PendingVideo, muxTraceId = createMuxTraceId()) => {
+    console.info('[MUX FLOW]', { traceId: muxTraceId, startingMuxUpload: true, propertyId, selectedFile: true, size: selectedVideo.file.size, name: selectedVideo.file.name });
+    setMuxRetryAvailable(false); setMuxProgress(0); setUploadStatus('Preparando video…');
+    try {
+      await startMuxVideoUpload(propertyId, selectedVideo.file, {
+        onProgress: (progress) => { setMuxProgress(progress); setUploadStatus(`Subiendo video… ${Math.round(progress)}%`); },
+        onProcessing: () => setUploadStatus('Video subido. Mux lo está procesando. Puedes salir de esta pantalla.'),
+        onController: (upload, jobId) => { muxUploadRef.current = upload; muxJobIdRef.current = jobId; },
+        onStage: (message, traceId) => setUploadStatus(`${message} Código ${traceId.slice(0, 8)}`),
+      }, muxTraceId);
+      return undefined;
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : 'No se pudo iniciar la subida del video. Intenta nuevamente.';
+      console.error('[MUX FLOW]', { traceId: muxTraceId, startingMuxUpload: false, propertyId, error: message });
+      setMuxRetryAvailable(true);
+      setUploadStatus('No se pudo iniciar la subida del video. Intenta nuevamente.');
+      return message;
+    }
+  };
+
+  const retryLargeVideo = async () => {
+    const propertyId = savedPropertyId ?? initial?.id;
+    const selectedVideo = pendingVideo;
+    if (!propertyId || !selectedVideo?.isLarge || busy) { setNotice('No se pudo reintentar el video. Guarda la propiedad e intenta nuevamente.'); return; }
+    setBusy(true); setNotice(null);
+    const error = await uploadLargeVideo(propertyId, selectedVideo);
+    if (error) { setNotice(`No se pudo iniciar la subida del video. ${error}`); setBusy(false); return; }
+    sessionStorage.setItem('adminNotice', 'El video terminó de subir y se está procesando. El video anterior seguirá activo hasta que el nuevo esté listo.');
+    window.location.replace(`/admin/properties/${propertyId}/edit`);
+  };
+
   const save = async (mode?: 'draft' | 'publish') => {
     const nextErrors = validate(values); setErrors(nextErrors); if (Object.keys(nextErrors).length) { document.querySelector('[aria-invalid="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     if (mode === 'publish' && !images.length && !pending.length && confirmAction !== 'publish') { setConfirmAction('publish'); return; }
-    const muxTraceId = pendingVideo?.isLarge ? createMuxTraceId() : undefined;
-    setConfirmAction(null); setBusy(true); setNotice(null); let propertyId = initial?.id;
+    const selectedVideo = pendingVideo;
+    const muxTraceId = selectedVideo?.isLarge ? createMuxTraceId() : undefined;
+    console.info('[MUX FLOW]', { selectedFile: Boolean(selectedVideo?.file), size: selectedVideo?.file.size ?? null, name: selectedVideo?.file.name ?? null });
+    setConfirmAction(null); setBusy(true); setNotice(null); let propertyId = savedPropertyId ?? initial?.id;
     if (muxTraceId) {
-      console.info('[MUX CLIENT]', { traceId: muxTraceId, event: 'property.submit', propertyId: propertyId ?? null, fileSize: pendingVideo?.file.size, fileType: pendingVideo?.file.type || 'unknown' });
+      console.info('[MUX CLIENT]', { traceId: muxTraceId, event: 'property.submit', propertyId: propertyId ?? null, fileSize: selectedVideo?.file.size, fileType: selectedVideo?.file.type || 'unknown' });
       setUploadStatus(`Guardando la propiedad antes del video… Código ${muxTraceId.slice(0, 8)}`);
     }
     try {
       if (propertyId) await updateProperty(propertyId, makeInput(mode)); else propertyId = await createProperty(makeInput(mode));
-      await setPropertyAmenities(propertyId, values.amenityIds);
-      for (let index = 0; index < pending.length; index += 1) { setUploadStatus(`Subiendo ${index + 1} de ${pending.length}…`); await uploadPropertyImage(propertyId, pending[index].file, images.length + index, !images.some((image) => image.isCover) && index === 0); }
-      if (muxTraceId) {
-        console.info('[MUX CLIENT]', { traceId: muxTraceId, event: 'property.saved', propertyId, fileStillPresent: Boolean(pendingVideo?.file) });
-        setUploadStatus(`Propiedad guardada. Preparando video… Código ${muxTraceId.slice(0, 8)}`);
-      }
     } catch (reason: unknown) { const message = reason instanceof Error ? reason.message : 'No pudimos guardar los cambios.'; if (!initial && propertyId) { sessionStorage.setItem('adminNotice', `La propiedad fue creada parcialmente. ${message}`); window.location.replace(`/admin/properties/${propertyId}/edit`); return; } setNotice(message); setBusy(false); setUploadStatus(''); return; }
     if (!propertyId) return;
+    setSavedPropertyId(propertyId);
+    console.info('[MUX FLOW]', { traceId: muxTraceId ?? null, propertySaved: true, propertyId, selectedFileStillPresent: Boolean(selectedVideo?.file) });
+    if (muxTraceId) {
+      console.info('[MUX CLIENT]', { traceId: muxTraceId, event: 'property.saved', propertyId, fileStillPresent: Boolean(selectedVideo?.file) });
+      setUploadStatus(`Propiedad guardada. Preparando video… Código ${muxTraceId.slice(0, 8)}`);
+    }
     let successNotice = initial ? (mode === 'publish' ? 'Propiedad publicada correctamente.' : 'Cambios guardados correctamente.') : (mode === 'publish' ? 'Propiedad creada y publicada.' : 'Borrador creado correctamente.');
-    if (pendingVideo) {
+    let largeVideoError: string | undefined;
+    if (selectedVideo?.isLarge) {
+      largeVideoError = await uploadLargeVideo(propertyId, selectedVideo, muxTraceId);
+      if (!largeVideoError) successNotice = `${successNotice} El video terminó de subir y se está procesando. El video anterior seguirá activo hasta que el nuevo esté listo.`;
+    }
+
+    let relatedSaveError: string | undefined;
+    try {
+      await setPropertyAmenities(propertyId, values.amenityIds);
+      for (let index = 0; index < pending.length; index += 1) { setUploadStatus(`Subiendo ${index + 1} de ${pending.length}…`); await uploadPropertyImage(propertyId, pending[index].file, images.length + index, !images.some((image) => image.isCover) && index === 0); }
+    } catch (reason: unknown) {
+      relatedSaveError = reason instanceof Error ? reason.message : 'No pudimos guardar todos los datos relacionados de la propiedad.';
+    }
+    if (relatedSaveError && !selectedVideo?.isLarge) {
+      if (!initial && propertyId) { sessionStorage.setItem('adminNotice', `La propiedad fue creada parcialmente. ${relatedSaveError}`); window.location.replace(`/admin/properties/${propertyId}/edit`); return; }
+      setNotice(relatedSaveError); setBusy(false); setUploadStatus(''); return;
+    }
+
+    if (selectedVideo && !selectedVideo.isLarge) {
       try {
-        if (pendingVideo.isLarge) {
-          setUploadStatus('Preparando video…');
-          await startMuxVideoUpload(propertyId, pendingVideo.file, {
-            onProgress: (progress) => { setMuxProgress(progress); setUploadStatus(`Subiendo video… ${Math.round(progress)}%`); },
-            onProcessing: () => setUploadStatus('Video subido. Mux lo está procesando. Puedes salir de esta pantalla.'),
-            onController: (upload, jobId) => { muxUploadRef.current = upload; muxJobIdRef.current = jobId; },
-            onStage: (message, traceId) => setUploadStatus(`${message} Código ${traceId.slice(0, 8)}`),
-          }, muxTraceId);
-          successNotice = `${successNotice} El video terminó de subir y se está procesando. El video anterior seguirá activo hasta que el nuevo esté listo.`;
-        } else {
-          setUploadStatus('Subiendo video…');
-          const previousMuxAssetId = initial?.videoProvider === 'mux' ? initial.muxAssetId : undefined;
-          const result = await uploadPropertyVideo(propertyId, pendingVideo.file, videoStoragePath);
-          if (previousMuxAssetId) {
-            try { await cleanupMuxAsset(propertyId, previousMuxAssetId); } catch { result.cleanupWarning = 'El nuevo video quedó activo, pero el asset anterior de Mux requiere limpieza manual.'; }
-          }
-          if (result.cleanupWarning) successNotice = `${successNotice} ${result.cleanupWarning}`;
+        setUploadStatus('Subiendo video…');
+        const previousMuxAssetId = initial?.videoProvider === 'mux' ? initial.muxAssetId : undefined;
+        const result = await uploadPropertyVideo(propertyId, selectedVideo.file, videoStoragePath);
+        if (previousMuxAssetId) {
+          try { await cleanupMuxAsset(propertyId, previousMuxAssetId); } catch { result.cleanupWarning = 'El nuevo video quedó activo, pero el asset anterior de Mux requiere limpieza manual.'; }
         }
+        if (result.cleanupWarning) successNotice = `${successNotice} ${result.cleanupWarning}`;
       } catch (reason: unknown) {
         const detail = reason instanceof Error ? ` ${reason.message}` : '';
-        successNotice = pendingVideo.isLarge
-          ? `Los cambios de la propiedad se guardaron. No se pudo procesar el video. El video anterior y los demás cambios de la propiedad se conservaron.${detail}`
-          : `Los cambios de la propiedad se guardaron. No se pudo subir el video. Los demás cambios de la propiedad no se perderán.${detail}`;
+        successNotice = `Los cambios de la propiedad se guardaron. No se pudo subir el video. Los demás cambios de la propiedad no se perderán.${detail}`;
       }
     }
+    if (largeVideoError) {
+      const relatedDetail = relatedSaveError ? ` Además: ${relatedSaveError}` : '';
+      setUploadStatus('No se pudo iniciar la subida del video. Intenta nuevamente.');
+      setNotice(`Los cambios de la propiedad se guardaron. No se pudo iniciar la subida del video. El archivo sigue seleccionado para reintentarlo. ${largeVideoError}${relatedDetail}`);
+      if (!initial) window.history.replaceState({}, '', `/admin/properties/${propertyId}/edit`);
+      setBusy(false);
+      return;
+    }
+    if (relatedSaveError) successNotice = `${successNotice} No se pudieron guardar todos los datos relacionados: ${relatedSaveError}`;
     sessionStorage.setItem('adminNotice', successNotice);
     window.location.replace(`/admin/properties/${propertyId}/edit`);
   };
@@ -212,10 +262,10 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
     </section>
     <section className="form-section"><div className="form-section-head"><span>06</span><div><h2>Video de la propiedad</h2><p>Selecciona un MP4 o MOV; el destino se elige automáticamente.</p></div></div>
       <label className="video-picker"><span><strong>Video MP4 o MOV</strong><small>Puedes subir videos directamente desde iPhone.<br />Hasta 50 MB se guarda en Supabase.<br />Los videos mayores se optimizan con Mux para reproducción web.</small></span><span className="button outline dark">Seleccionar video</span><input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" onChange={chooseVideo} /></label>
-      {pendingVideo?.isLarge && <div className="mux-upload-card"><span className="mux-upload-icon"><LoaderCircle size={22} /></span><div><strong>Video seleccionado</strong><p>Este video supera los 50 MB y será optimizado automáticamente para reproducción web.</p><small>{pendingVideo.file.name} · {pendingVideoFormat} · {formatFileSize(pendingVideo.file.size)}</small>{uploadStatus && <div className="mux-upload-state"><span>{uploadStatus}</span>{uploadStatus.includes('%') && <progress max="100" value={muxProgress}>{muxProgress}%</progress>}</div>}</div>{muxJobIdRef.current && uploadStatus.includes('Subiendo') && <button type="button" className="text-button danger-text" onClick={() => void cancelActiveMuxUpload()}>Cancelar subida</button>}</div>}
+      {pendingVideo?.isLarge && <div className="mux-upload-card"><span className="mux-upload-icon"><LoaderCircle size={22} /></span><div><strong>Video seleccionado</strong><p>Este video supera los 50 MB y será optimizado automáticamente para reproducción web.</p><small>{pendingVideo.file.name} · {pendingVideoFormat} · {formatFileSize(pendingVideo.file.size)}</small>{uploadStatus && <div className="mux-upload-state"><span>{uploadStatus}</span>{uploadStatus.includes('%') && <progress max="100" value={muxProgress}>{muxProgress}%</progress>}</div>}</div>{muxRetryAvailable ? <button type="button" className="text-button" disabled={busy} onClick={() => void retryLargeVideo()}>Reintentar video</button> : muxJobIdRef.current && uploadStatus.includes('Subiendo') ? <button type="button" className="text-button danger-text" onClick={() => void cancelActiveMuxUpload()}>Cancelar subida</button> : null}</div>}
       {muxJob && <div className={`mux-job-status ${muxJob.status}`} role="status">{muxProcessing && <LoaderCircle className="mux-status-spinner" size={19} />}<div><strong>{muxJob.status === 'completed' ? 'Video listo' : muxJob.status === 'error' ? 'No se pudo procesar el video' : muxJob.status === 'processing' ? 'Procesando video…' : muxJob.status === 'cancelled' ? 'Subida cancelada' : `Subiendo… ${Math.round(muxJob.progress)}%`}</strong><small>{muxJob.originalFilename}</small>{muxJob.status === 'error' && <p>El video anterior y los demás cambios de la propiedad se conservaron.</p>}</div>{muxProcessing && <button type="button" className="text-button danger-text" onClick={() => void cancelPersistedMuxJob()}>Cancelar</button>}</div>}
       {initial?.videoProvider === 'mux' && initial.muxPlaybackId && initial.videoStatus === 'ready' && !pendingVideo && <div className="admin-video-preview"><div className="admin-mux-player" style={{ aspectRatio: initial.videoAspectRatio?.replace(':', ' / ') ?? '9 / 16' }}><MuxPropertyVideo propertyId={initial.id} playbackId={initial.muxPlaybackId} title={values.title || 'Video de la propiedad'} admin /></div><div><span className="video-file-meta"><strong>Video Mux actual</strong><small>Optimizado para reproducción web</small></span><button type="button" className="text-button danger-text" disabled={busy} onClick={() => setConfirmAction('video')}>Eliminar video</button></div></div>}
-      {(pendingVideo?.preview || videoUrl) && <div className={`admin-video-preview ${showVideoPlayer ? '' : 'preview-unavailable'}`}>{showVideoPlayer ? <video controls playsInline preload="metadata" style={{ aspectRatio: `${videoDimensions.width} / ${videoDimensions.height}`, width: videoDimensions.width > videoDimensions.height ? 'min(100%, 700px)' : 'min(100%, 405px)' }} onLoadedMetadata={(event) => { const video = event.currentTarget; if (video.videoWidth && video.videoHeight) setVideoDimensions({ width: video.videoWidth, height: video.videoHeight }); }} onError={() => setVideoPlaybackWarning(true)} aria-label={`Recorrido en video de ${values.title || 'la propiedad'}`}><source src={pendingVideo?.preview ?? videoUrl} type={pendingVideo ? videoMimeType(pendingVideo.file.name) : videoMimeType(videoStoragePath)} />Tu navegador no puede reproducir este video.</video> : <div className="video-fallback-card"><strong>{pendingVideo ? 'Video MOV seleccionado correctamente' : 'Video MOV guardado'}</strong><p>Este navegador puede no mostrar la vista previa.</p></div>}{videoPlaybackWarning && isMovVideo && showVideoPlayer && <p className="video-compatibility-note">Este navegador puede no reproducir archivos MOV. La reproducción puede variar según el dispositivo.</p>}<div><span className="video-file-meta"><strong>{pendingVideo ? pendingVideo.file.name : 'Video actual'}</strong>{pendingVideo && <small>{pendingVideoFormat} · {formatFileSize(pendingVideo.file.size)}</small>}</span>{pendingVideo ? <button type="button" className="text-button" onClick={() => { if (pendingVideo.preview) URL.revokeObjectURL(pendingVideo.preview); setPendingVideo(null); setVideoPlaybackWarning(false); }}>Cancelar reemplazo</button> : initial && videoStoragePath ? <button type="button" className="text-button danger-text" disabled={busy} onClick={() => setConfirmAction('video')}>Eliminar video</button> : null}</div></div>}
+      {(pendingVideo?.preview || videoUrl) && <div className={`admin-video-preview ${showVideoPlayer ? '' : 'preview-unavailable'}`}>{showVideoPlayer ? <video controls playsInline preload="metadata" style={{ aspectRatio: `${videoDimensions.width} / ${videoDimensions.height}`, width: videoDimensions.width > videoDimensions.height ? 'min(100%, 700px)' : 'min(100%, 405px)' }} onLoadedMetadata={(event) => { const video = event.currentTarget; if (video.videoWidth && video.videoHeight) setVideoDimensions({ width: video.videoWidth, height: video.videoHeight }); }} onError={() => setVideoPlaybackWarning(true)} aria-label={`Recorrido en video de ${values.title || 'la propiedad'}`}><source src={pendingVideo?.preview ?? videoUrl} type={pendingVideo ? videoMimeType(pendingVideo.file.name) : videoMimeType(videoStoragePath)} />Tu navegador no puede reproducir este video.</video> : <div className="video-fallback-card"><strong>{pendingVideo ? 'Video MOV seleccionado correctamente' : 'Video MOV guardado'}</strong><p>Este navegador puede no mostrar la vista previa.</p></div>}{videoPlaybackWarning && isMovVideo && showVideoPlayer && <p className="video-compatibility-note">Este navegador puede no reproducir archivos MOV. La reproducción puede variar según el dispositivo.</p>}<div><span className="video-file-meta"><strong>{pendingVideo ? pendingVideo.file.name : 'Video actual'}</strong>{pendingVideo && <small>{pendingVideoFormat} · {formatFileSize(pendingVideo.file.size)}</small>}</span>{pendingVideo ? <button type="button" className="text-button" onClick={() => { if (pendingVideo.preview) URL.revokeObjectURL(pendingVideo.preview); setPendingVideo(null); setMuxRetryAvailable(false); setUploadStatus(''); setVideoPlaybackWarning(false); }}>Cancelar reemplazo</button> : initial && videoStoragePath ? <button type="button" className="text-button danger-text" disabled={busy} onClick={() => setConfirmAction('video')}>Eliminar video</button> : null}</div></div>}
       {!pendingVideo && initial && hasStoredVideo && initial.videoProvider !== 'mux' && !videoUrl && <p className="video-compatibility-note">El video actual está guardado, pero la vista previa no está disponible temporalmente.</p>}
     </section>
     {initial && <div className="secondary-actions"><div className="danger-actions"><button type="button" className="button danger-button" disabled={busy} onClick={() => setConfirmAction('delete')}>Eliminar</button><button type="button" className="button outline dark" disabled={busy} onClick={() => setConfirmAction('archive')}>Archivar</button></div>{initial.published && <a className="button outline dark action-view" href={`/propiedad/${initial.slug}`} target="_blank" rel="noreferrer"><Eye size={16} /> Ver propiedad</a>}</div>}
