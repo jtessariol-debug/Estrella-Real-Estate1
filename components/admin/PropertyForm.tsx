@@ -7,7 +7,7 @@ import { slugify } from '../../utils/slug';
 import { formatPriceInput, normalizePriceInput } from '../../utils/format';
 import { getVideoContentType, getVideoExtension, validatePropertyVideo, VIDEO_MAX_SIZE_BYTES } from '../../utils/video';
 import { validateMuxSourceVideo } from '../../utils/video';
-import { cancelMuxVideoUpload, cleanupMuxAsset, deleteHybridPropertyVideo, getLatestMuxVideoJob, startMuxVideoUpload, type MuxVideoJob } from '../../services/muxVideo';
+import { cancelMuxVideoUpload, cleanupMuxAsset, createMuxTraceId, deleteHybridPropertyVideo, getLatestMuxVideoJob, startMuxVideoUpload, type MuxVideoJob } from '../../services/muxVideo';
 import MuxPropertyVideo from '../MuxPropertyVideo';
 
 type FormValues = {
@@ -121,11 +121,20 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
   const save = async (mode?: 'draft' | 'publish') => {
     const nextErrors = validate(values); setErrors(nextErrors); if (Object.keys(nextErrors).length) { document.querySelector('[aria-invalid="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     if (mode === 'publish' && !images.length && !pending.length && confirmAction !== 'publish') { setConfirmAction('publish'); return; }
+    const muxTraceId = pendingVideo?.isLarge ? createMuxTraceId() : undefined;
     setConfirmAction(null); setBusy(true); setNotice(null); let propertyId = initial?.id;
+    if (muxTraceId) {
+      console.info('[MUX CLIENT]', { traceId: muxTraceId, event: 'property.submit', propertyId: propertyId ?? null, fileSize: pendingVideo?.file.size, fileType: pendingVideo?.file.type || 'unknown' });
+      setUploadStatus(`Guardando la propiedad antes del video… Código ${muxTraceId.slice(0, 8)}`);
+    }
     try {
       if (propertyId) await updateProperty(propertyId, makeInput(mode)); else propertyId = await createProperty(makeInput(mode));
       await setPropertyAmenities(propertyId, values.amenityIds);
       for (let index = 0; index < pending.length; index += 1) { setUploadStatus(`Subiendo ${index + 1} de ${pending.length}…`); await uploadPropertyImage(propertyId, pending[index].file, images.length + index, !images.some((image) => image.isCover) && index === 0); }
+      if (muxTraceId) {
+        console.info('[MUX CLIENT]', { traceId: muxTraceId, event: 'property.saved', propertyId, fileStillPresent: Boolean(pendingVideo?.file) });
+        setUploadStatus(`Propiedad guardada. Preparando video… Código ${muxTraceId.slice(0, 8)}`);
+      }
     } catch (reason: unknown) { const message = reason instanceof Error ? reason.message : 'No pudimos guardar los cambios.'; if (!initial && propertyId) { sessionStorage.setItem('adminNotice', `La propiedad fue creada parcialmente. ${message}`); window.location.replace(`/admin/properties/${propertyId}/edit`); return; } setNotice(message); setBusy(false); setUploadStatus(''); return; }
     if (!propertyId) return;
     let successNotice = initial ? (mode === 'publish' ? 'Propiedad publicada correctamente.' : 'Cambios guardados correctamente.') : (mode === 'publish' ? 'Propiedad creada y publicada.' : 'Borrador creado correctamente.');
@@ -137,7 +146,8 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
             onProgress: (progress) => { setMuxProgress(progress); setUploadStatus(`Subiendo video… ${Math.round(progress)}%`); },
             onProcessing: () => setUploadStatus('Video subido. Mux lo está procesando. Puedes salir de esta pantalla.'),
             onController: (upload, jobId) => { muxUploadRef.current = upload; muxJobIdRef.current = jobId; },
-          });
+            onStage: (message, traceId) => setUploadStatus(`${message} Código ${traceId.slice(0, 8)}`),
+          }, muxTraceId);
           successNotice = `${successNotice} El video terminó de subir y se está procesando. El video anterior seguirá activo hasta que el nuevo esté listo.`;
         } else {
           setUploadStatus('Subiendo video…');

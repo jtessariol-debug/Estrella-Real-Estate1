@@ -34,8 +34,12 @@ function reasonCode(reason: unknown): string | undefined {
 export default async function handler(request: ApiRequest, response: ServerResponse) {
   if (!allowMethods(request, response, ['POST'])) return;
   let jobId: string | undefined;
+  const traceHeader = Array.isArray(request.headers['x-mux-trace-id']) ? request.headers['x-mux-trace-id'][0] : request.headers['x-mux-trace-id'];
+  const traceId = traceHeader && /^[a-z0-9-]{8,80}$/i.test(traceHeader) ? traceHeader : 'untracked';
   try {
+    console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'request.received', status: 'started' });
     const user = await requireStaff(request, '/api/mux/direct-upload');
+    console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'request.authenticated', status: 'ok' });
     const body = await readJsonBody<RequestBody>(request);
     const propertyId = body.property_id?.trim();
     const filename = body.filename?.trim() ?? '';
@@ -59,21 +63,23 @@ export default async function handler(request: ApiRequest, response: ServerRespo
     }).select('id').single();
     if (inserted.error) throw inserted.error;
     jobId = String(inserted.data.id);
+    console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'job.inserted', status: 'ok', jobId, propertyId });
 
     const upload = await createMuxDirectUpload(jobId, user.id, uploadOrigin);
+    console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'mux-upload.created', status: 'ok', jobId, muxUploadId: upload.id });
     const linked = await supabase.from('property_video_jobs').update({ mux_upload_id: upload.id }).eq('id', jobId);
     if (linked.error) {
       await supabase.from('property_video_jobs').update({ status: 'error', error_code: 'job_link_failed' }).eq('id', jobId);
       throw linked.error;
     }
 
-    console.info('Mux direct upload created', { jobId, propertyId, muxUploadId: upload.id });
+    console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'response.sent', status: 201, jobId, muxUploadId: upload.id, uploadUrlReturned: Boolean(upload.url) });
     sendJson(response, 201, { upload_url: upload.url, job_id: jobId, mux_upload_id: upload.id });
   } catch (reason) {
     if (jobId) await getSupabaseAdmin().from('property_video_jobs').update({ status: 'error', error_code: 'direct_upload_failed' }).eq('id', jobId);
     const status = statusFromError(reason);
     const code = reasonCode(reason);
-    console.error('Mux direct upload failed', { jobId, status, code, reason: reason instanceof Error ? reason.message : String(reason) });
+    console.error('[MUX DIRECT UPLOAD]', { traceId, stage: 'request.failed', jobId, status, code, reason: reason instanceof Error ? reason.message : String(reason) });
     const error = status === 401
       ? 'Tu sesión expiró. Inicia sesión nuevamente.'
       : code === 'access_verification_failed'
