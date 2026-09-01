@@ -12,6 +12,11 @@ export type MuxVideoJob = {
 };
 
 type DirectUploadResponse = { upload_url: string; job_id: string; mux_upload_id: string };
+const API_TIMEOUT_MS = 20_000;
+const UPLOAD_STALL_TIMEOUT_MS = 120_000;
+const INITIAL_CHUNK_SIZE_KB = 5 * 1024;
+const MIN_CHUNK_SIZE_KB = 1024;
+const MAX_CHUNK_SIZE_KB = 20 * 1024;
 
 async function authHeaders(): Promise<Record<string, string>> {
   const { data, error } = await requireSupabase().auth.getSession();
@@ -20,10 +25,21 @@ async function authHeaders(): Promise<Record<string, string>> {
 }
 
 async function apiRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(url, { ...init, headers: { ...(await authHeaders()), ...init.headers } });
-  const payload = await response.json().catch(() => ({})) as { error?: string } & T;
-  if (!response.ok) throw new Error(payload.error || 'No se pudo completar la operación de video.');
-  return payload;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal, headers: { ...(await authHeaders()), ...init.headers } });
+    const payload = await response.json().catch(() => ({})) as { error?: string } & T;
+    if (!response.ok) throw new Error(payload.error || 'No se pudo completar la operación de video.');
+    return payload;
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === 'AbortError') {
+      throw new Error('La preparación del video tardó demasiado. Comprueba tu conexión e inténtalo nuevamente.');
+    }
+    throw reason;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 export async function startMuxVideoUpload(
@@ -40,11 +56,46 @@ export async function startMuxVideoUpload(
     body: JSON.stringify({ property_id: propertyId, filename: file.name, size: file.size }),
   });
 
+  let upload: UpChunk;
+  try {
+    upload = createUpload({
+      endpoint: prepared.upload_url,
+      file,
+      chunkSize: INITIAL_CHUNK_SIZE_KB,
+      minChunkSize: MIN_CHUNK_SIZE_KB,
+      maxChunkSize: MAX_CHUNK_SIZE_KB,
+      attempts: 5,
+      dynamicChunkSize: true,
+    });
+  } catch (reason) {
+    try { await apiRequest(`/api/mux/job?job_id=${encodeURIComponent(prepared.job_id)}`, { method: 'DELETE' }); }
+    catch { /* El error original de inicio es el más útil para el usuario. */ }
+    throw new Error(reason instanceof Error ? `No se pudo iniciar la subida: ${reason.message}` : 'No se pudo iniciar la subida del video.');
+  }
+
   return new Promise((resolve, reject) => {
-    const upload = createUpload({ endpoint: prepared.upload_url, file, chunkSize: 16, attempts: 5, dynamicChunkSize: true });
     callbacks.onController(upload, prepared.job_id);
     let lastPersisted = -10;
+    let settled = false;
+    let stallTimer: number | undefined;
+    const armStallTimer = () => {
+      if (stallTimer) window.clearTimeout(stallTimer);
+      stallTimer = window.setTimeout(() => {
+        void fail('La subida dejó de avanzar. Comprueba tu conexión e intenta el video nuevamente.');
+      }, UPLOAD_STALL_TIMEOUT_MS);
+    };
+    const fail = async (message: string) => {
+      if (settled) return;
+      settled = true;
+      if (stallTimer) window.clearTimeout(stallTimer);
+      upload.abort();
+      try { await apiRequest(`/api/mux/job?job_id=${encodeURIComponent(prepared.job_id)}`, { method: 'DELETE' }); }
+      catch { /* El job se reconciliará por timeout aunque falle la limpieza remota. */ }
+      reject(new Error(message));
+    };
+    armStallTimer();
     upload.on('progress', (event) => {
+      armStallTimer();
       const progress = Math.max(0, Math.min(100, Number(event.detail) || 0));
       callbacks.onProgress(progress);
       if (progress - lastPersisted >= 5 || progress === 100) {
@@ -53,11 +104,14 @@ export async function startMuxVideoUpload(
       }
     });
     upload.on('success', () => {
+      if (settled) return;
+      settled = true;
+      if (stallTimer) window.clearTimeout(stallTimer);
       callbacks.onProgress(100);
       callbacks.onProcessing();
       resolve({ jobId: prepared.job_id });
     });
-    upload.on('error', (event) => reject(new Error(event.detail?.message || 'No se pudo subir el video a Mux.')));
+    upload.on('error', (event) => void fail(event.detail?.message || 'No se pudo subir el video a Mux.'));
   });
 }
 
@@ -68,18 +122,21 @@ export async function cancelMuxVideoUpload(jobId: string, upload?: UpChunk): Pro
 
 export async function getLatestMuxVideoJob(propertyId: string): Promise<MuxVideoJob | undefined> {
   const result = await requireSupabase().from('property_video_jobs')
-    .select('id, property_id, status, progress, error_code, original_filename')
+    .select('id, property_id, status, progress, error_code, original_filename, updated_at')
     .eq('property_id', propertyId)
     .order('created_at', { ascending: false })
     .limit(1).maybeSingle();
   if (result.error) throw new Error('No pudimos comprobar el estado del video en Mux.');
   if (!result.data) return undefined;
+  const status = result.data.status as MuxVideoJobStatus;
+  const selectedIsStale = status === 'selected'
+    && Date.now() - new Date(String(result.data.updated_at)).getTime() > 5 * 60 * 1000;
   return {
     id: String(result.data.id),
     propertyId: String(result.data.property_id),
-    status: result.data.status as MuxVideoJobStatus,
+    status: selectedIsStale ? 'error' : status,
     progress: Number(result.data.progress),
-    errorCode: result.data.error_code ? String(result.data.error_code) : undefined,
+    errorCode: selectedIsStale ? 'upload_not_started' : result.data.error_code ? String(result.data.error_code) : undefined,
     originalFilename: String(result.data.original_filename),
   };
 }

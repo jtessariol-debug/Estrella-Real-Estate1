@@ -60,6 +60,7 @@ export default async function handler(request: ApiRequest, response: ServerRespo
     const event = JSON.parse(rawBody) as MuxEvent;
     const data = event.data ?? {};
     const supabase = getSupabaseAdmin();
+    console.info('Mux webhook received', { type: event.type, objectId: data.id, assetId: data.asset_id });
 
     if (event.type === 'video.upload.asset_created') {
       const job = await supabase.from('property_video_jobs').select('id, status').eq('mux_upload_id', data.id).maybeSingle();
@@ -95,6 +96,7 @@ export default async function handler(request: ApiRequest, response: ServerRespo
       await supabase.from('property_video_jobs').update({ status: 'error', error_code: 'mux_asset_deleted' }).eq('mux_asset_id', data.id).in('status', ['selected', 'uploading', 'processing']);
     }
 
+    console.info('Mux webhook processed', { type: event.type, objectId: data.id });
     sendJson(response, 200, { received: true });
   } catch (reason) {
     console.error('Mux webhook processing failed', reason instanceof Error ? reason.message : reason);

@@ -23,11 +23,11 @@ export async function muxRequest<T>(path: string, init: RequestInit = {}): Promi
 
 export type DirectUpload = { id: string; url: string; status: string };
 
-export function createMuxDirectUpload(jobId: string, userId: string): Promise<DirectUpload> {
+export function createMuxDirectUpload(jobId: string, userId: string, corsOrigin: string): Promise<DirectUpload> {
   return muxRequest<DirectUpload>('/video/v1/uploads', {
     method: 'POST',
     body: JSON.stringify({
-      cors_origin: requiredEnv('APP_ORIGIN').replace(/\/$/, ''),
+      cors_origin: corsOrigin,
       timeout: 86400,
       new_asset_settings: {
         playback_policies: ['signed'],

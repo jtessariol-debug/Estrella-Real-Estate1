@@ -135,7 +135,7 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
           setUploadStatus('Preparando video…');
           await startMuxVideoUpload(propertyId, pendingVideo.file, {
             onProgress: (progress) => { setMuxProgress(progress); setUploadStatus(`Subiendo video… ${Math.round(progress)}%`); },
-            onProcessing: () => setUploadStatus('Procesando video…'),
+            onProcessing: () => setUploadStatus('Video subido. Mux lo está procesando. Puedes salir de esta pantalla.'),
             onController: (upload, jobId) => { muxUploadRef.current = upload; muxJobIdRef.current = jobId; },
           });
           successNotice = `${successNotice} El video terminó de subir y se está procesando. El video anterior seguirá activo hasta que el nuevo esté listo.`;
