@@ -5,30 +5,63 @@ import { getSupabaseAdmin, requireStaff, statusFromError } from '../../server/su
 
 type RequestBody = { property_id?: string; filename?: string; size?: number };
 const VIDEO_MAX_SIZE_BYTES = 50 * 1024 * 1024;
+const PUBLIC_UPLOAD_ORIGINS = [
+  'https://www.estrellarealestate.site',
+  'https://estrellarealestate.site',
+  'https://estrella-real-estate1.vercel.app',
+];
+
+function normalizedOrigin(value?: string): string | undefined {
+  if (!value) return undefined;
+  try { return new URL(value).origin; }
+  catch { return undefined; }
+}
+
+function allowedUploadOrigins(): Set<string> {
+  const configured = normalizedOrigin(requiredEnv('APP_ORIGIN'));
+  const vercelProduction = normalizedOrigin(process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : undefined);
+  return new Set([...PUBLIC_UPLOAD_ORIGINS, configured, vercelProduction].filter((value): value is string => Boolean(value)));
+}
 
 function getUploadOrigin(request: ApiRequest): string {
-  const configuredOrigin = new URL(requiredEnv('APP_ORIGIN')).origin;
   const header = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
-  if (!header) return configuredOrigin;
-
-  let requestOrigin: URL;
-  try { requestOrigin = new URL(header); }
-  catch { throw Object.assign(new Error('Origen de subida inválido.'), { statusCode: 403 }); }
-
-  const forwardedHost = request.headers['x-forwarded-host'];
-  const forwardedHosts = (Array.isArray(forwardedHost) ? forwardedHost : [forwardedHost])
-    .flatMap((value) => value?.split(',') ?? [])
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const requestHosts = new Set([request.headers.host, ...forwardedHosts].filter((value): value is string => Boolean(value)));
-  if (requestOrigin.protocol !== 'https:' || (!requestHosts.has(requestOrigin.host) && requestOrigin.origin !== configuredOrigin)) {
-    throw Object.assign(new Error('Origen de subida no autorizado.'), { statusCode: 403, code: 'upload_origin_forbidden' });
+  if (!header) throw Object.assign(new Error('La solicitud no incluye un origen válido.'), { statusCode: 400, code: 'origin_missing' });
+  const requestOrigin = normalizedOrigin(header);
+  if (!requestOrigin) throw Object.assign(new Error('El origen de la solicitud no es válido.'), { statusCode: 400, code: 'origin_invalid' });
+  if (!allowedUploadOrigins().has(requestOrigin)) {
+    throw Object.assign(new Error('El origen de la solicitud no está permitido.'), { statusCode: 400, code: 'origin_denied' });
   }
-  return requestOrigin.origin;
+  return requestOrigin;
 }
 
 function reasonCode(reason: unknown): string | undefined {
   return reason && typeof reason === 'object' && 'code' in reason ? String((reason as { code?: unknown }).code) : undefined;
+}
+
+type DirectUploadErrorReason =
+  | 'session_invalid'
+  | 'profile_missing'
+  | 'role_denied'
+  | 'origin_denied'
+  | 'profile_lookup_failed'
+  | 'internal_error';
+
+function errorResponse(reason: unknown, status: number): { error: string; code: string; reason: DirectUploadErrorReason } {
+  const code = reasonCode(reason) ?? 'direct_upload_failed';
+  if (status === 401) return { error: 'Tu sesión expiró. Inicia sesión nuevamente.', code, reason: 'session_invalid' };
+  if (code === 'profile_missing') return { error: 'Tu cuenta no tiene un perfil administrativo.', code, reason: 'profile_missing' };
+  if (code === 'role_denied') return { error: 'No tienes permisos para administrar videos.', code, reason: 'role_denied' };
+  if (code === 'origin_missing' || code === 'origin_invalid' || code === 'origin_denied') {
+    return { error: 'Esta página no está autorizada para iniciar la subida del video.', code, reason: 'origin_denied' };
+  }
+  if (code === 'profile_lookup_failed') {
+    return { error: 'No se pudo verificar tu acceso. Intenta nuevamente.', code, reason: 'profile_lookup_failed' };
+  }
+  return {
+    error: safeErrorMessage(reason, 'No se pudo preparar la subida del video. Inténtalo nuevamente.'),
+    code,
+    reason: 'internal_error',
+  };
 }
 
 export default async function handler(request: ApiRequest, response: ServerResponse) {
@@ -37,8 +70,18 @@ export default async function handler(request: ApiRequest, response: ServerRespo
   const traceHeader = Array.isArray(request.headers['x-mux-trace-id']) ? request.headers['x-mux-trace-id'][0] : request.headers['x-mux-trace-id'];
   const traceId = traceHeader && /^[a-z0-9-]{8,80}$/i.test(traceHeader) ? traceHeader : 'untracked';
   try {
-    console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'request.received', status: 'started' });
-    const user = await requireStaff(request, '/api/mux/direct-upload');
+    const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
+    const forwardedHost = Array.isArray(request.headers['x-forwarded-host']) ? request.headers['x-forwarded-host'][0] : request.headers['x-forwarded-host'];
+    console.info('[MUX DIRECT UPLOAD]', {
+      traceId,
+      stage: 'request.received',
+      status: 'started',
+      origin,
+      host: request.headers.host,
+      forwardedHost,
+      appOrigin: normalizedOrigin(process.env.APP_ORIGIN),
+    });
+    const user = await requireStaff(request, '/api/mux/direct-upload', traceId);
     console.info('[MUX DIRECT UPLOAD]', { traceId, stage: 'request.authenticated', status: 'ok' });
     const body = await readJsonBody<RequestBody>(request);
     const propertyId = body.property_id?.trim();
@@ -80,13 +123,6 @@ export default async function handler(request: ApiRequest, response: ServerRespo
     const status = statusFromError(reason);
     const code = reasonCode(reason);
     console.error('[MUX DIRECT UPLOAD]', { traceId, stage: 'request.failed', jobId, status, code, reason: reason instanceof Error ? reason.message : String(reason) });
-    const error = status === 401
-      ? 'Tu sesión expiró. Inicia sesión nuevamente.'
-      : code === 'access_verification_failed'
-        ? 'No se pudo verificar tu acceso. Intenta nuevamente.'
-        : status === 403
-          ? 'No tienes permisos para administrar videos.'
-        : safeErrorMessage(reason, 'No se pudo preparar la subida del video. Inténtalo nuevamente.');
-    sendJson(response, status, { error });
+    sendJson(response, status, errorResponse(reason, status));
   }
 }

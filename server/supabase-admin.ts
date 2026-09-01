@@ -15,21 +15,26 @@ export function getSupabaseAdmin(): SupabaseClient {
 
 const partialUserId = (id?: string) => id ? `${id.slice(0, 8)}…` : undefined;
 
-export async function requireStaff(request: IncomingMessage, endpoint = request.url?.split('?')[0] ?? 'unknown'): Promise<User> {
+export async function requireStaff(
+  request: IncomingMessage,
+  endpoint = request.url?.split('?')[0] ?? 'unknown',
+  traceId?: string,
+): Promise<User> {
   const token = bearerToken(request);
   if (!token) {
-    console.warn('[STAFF AUTH]', { endpoint, authenticated: false, profileFound: false, authorization: 'denied', status: 401 });
+    console.warn('[STAFF AUTH]', { traceId, endpoint, authenticated: false, profileFound: false, authorization: 'denied', status: 401 });
     throw Object.assign(new Error('Debes iniciar sesión nuevamente.'), { statusCode: 401, code: 'session_missing' });
   }
   const client = getSupabaseAdmin();
   const { data, error } = await client.auth.getUser(token);
   if (error || !data.user) {
-    console.warn('[STAFF AUTH]', { endpoint, authenticated: false, profileFound: false, authorization: 'denied', status: 401, authError: error?.code });
+    console.warn('[STAFF AUTH]', { traceId, endpoint, authenticated: false, profileFound: false, authorization: 'denied', status: 401, authError: error?.code });
     throw Object.assign(new Error('La sesión no es válida.'), { statusCode: 401, code: 'session_invalid' });
   }
-  const profile = await client.from('profiles').select('role').eq('id', data.user.id).maybeSingle();
+  const profile = await client.from('profiles').select('id, role').eq('id', data.user.id).maybeSingle();
   if (profile.error) {
     console.error('[STAFF AUTH]', {
+      traceId,
       endpoint,
       userId: partialUserId(data.user.id),
       authenticated: true,
@@ -38,11 +43,12 @@ export async function requireStaff(request: IncomingMessage, endpoint = request.
       status: 500,
       databaseError: profile.error.code,
     });
-    throw Object.assign(new Error('No se pudo verificar el perfil administrativo.'), { statusCode: 500, code: 'access_verification_failed' });
+    throw Object.assign(new Error('No se pudo verificar el perfil administrativo.'), { statusCode: 500, code: 'profile_lookup_failed' });
   }
   const role = profile.data?.role ? String(profile.data.role) : undefined;
   const allowed = Boolean(profile.data && role && ['admin', 'editor'].includes(role));
   console.info('[STAFF AUTH]', {
+    traceId,
     endpoint,
     userId: partialUserId(data.user.id),
     authenticated: true,
@@ -54,7 +60,7 @@ export async function requireStaff(request: IncomingMessage, endpoint = request.
   if (!allowed) {
     throw Object.assign(new Error('No tienes permisos para administrar videos.'), {
       statusCode: 403,
-      code: profile.data ? 'staff_role_required' : 'profile_missing',
+      code: profile.data ? 'role_denied' : 'profile_missing',
     });
   }
   return data.user;

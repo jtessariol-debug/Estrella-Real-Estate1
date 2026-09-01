@@ -62,7 +62,8 @@ async function apiRequest<T>(url: string, init: RequestInit = {}, traceId?: stri
       headers: { ...(await authHeaders(traceId)), ...(traceId ? { 'X-Mux-Trace-Id': traceId } : {}), ...init.headers },
     });
     muxClientLog(traceId, 'api.response', { path: new URL(url, window.location.origin).pathname, status: response.status });
-    const payload = await response.json().catch(() => ({})) as { error?: string } & T;
+    const payload = await response.json().catch(() => ({})) as { error?: string; code?: string; reason?: string } & T;
+    if (!response.ok) muxClientLog(traceId, 'api.error', { path: new URL(url, window.location.origin).pathname, status: response.status, code: payload.code, reason: payload.reason });
     if (!response.ok) throw new Error(payload.error || 'No se pudo completar la operación de video.');
     return payload;
   } catch (reason) {
