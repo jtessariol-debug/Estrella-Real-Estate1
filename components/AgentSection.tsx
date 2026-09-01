@@ -14,11 +14,11 @@ export default function AgentSection() {
         <div className="agent-portrait-wrap">
           <img
             className="agent-portrait"
-            src="/images/alexis-estrella-agent.jpeg"
-            alt="Alexis Estrella, asesor inmobiliario de Estrella Real Estate"
+            src="/images/alexis-estrella.png"
+            alt="Alexis Estrella - Asesor inmobiliario"
             loading="lazy"
-            width="1086"
-            height="1448"
+            width="1254"
+            height="1254"
           />
           <span className="agent-image-accent" aria-hidden="true" />
         </div>
