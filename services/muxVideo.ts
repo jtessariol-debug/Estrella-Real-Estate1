@@ -11,6 +11,18 @@ export type MuxVideoJob = {
   originalFilename: string;
 };
 
+export type MuxUploadFailure = Error & {
+  uploadStarted: boolean;
+  lastProgress: number;
+  requestCode: string;
+  jobId?: string;
+  muxUploadId?: string;
+};
+
+export function isInterruptedMuxUpload(reason: unknown): reason is MuxUploadFailure {
+  return reason instanceof Error && 'uploadStarted' in reason && (reason as MuxUploadFailure).uploadStarted;
+}
+
 type DirectUploadResponse = { upload_url: string; job_id: string; mux_upload_id: string };
 const API_TIMEOUT_MS = 20_000;
 const SESSION_TIMEOUT_MS = 20_000;
@@ -114,13 +126,15 @@ export async function startMuxVideoUpload(
     throw new Error(`El servicio de video devolvió una respuesta incompleta. Código ${traceId.slice(0, 8)}.`);
   }
 
+  const endpointHostname = new URL(prepared.upload_url).hostname;
+  console.info('[MUX UPLOAD]', { requestCode: traceId, jobId: prepared.job_id, muxUploadId: prepared.mux_upload_id, uploadStarted: false, lastProgress: 0, endpointHostname });
+
   let upload: UpChunk;
   try {
-    const endpointHost = new URL(prepared.upload_url).hostname;
     callbacks.onStage('Conectando con el servicio de video…', traceId);
     muxClientLog(traceId, 'upchunk.init', {
       upchunkInit: true,
-      endpointHost,
+      endpointHost: endpointHostname,
       chunkSize: INITIAL_CHUNK_SIZE_KB,
       minChunkSize: MIN_CHUNK_SIZE_KB,
       maxChunkSize: MAX_CHUNK_SIZE_KB,
@@ -151,6 +165,10 @@ export async function startMuxVideoUpload(
     let lastPersisted = -10;
     let lastLoggedProgress = -10;
     let hasProgress = false;
+    let lastProgress = 0;
+    let lastAttemptedChunk: number | undefined;
+    let lastSuccessfulChunk: number | undefined;
+    let lastHttpStatus: number | undefined;
     let settled = false;
     let stallTimer: number | undefined;
     const armStallTimer = (milliseconds = hasProgress ? UPLOAD_STALL_TIMEOUT_MS : UPLOAD_START_TIMEOUT_MS) => {
@@ -160,20 +178,42 @@ export async function startMuxVideoUpload(
           ? 'La subida dejó de avanzar. Comprueba tu conexión e intenta el video nuevamente.'
           : 'No se pudo conectar con el servicio de video.';
         muxClientLog(traceId, 'upload.timeout', { hasProgress, timeoutMs: milliseconds });
-        void fail(message);
+        void fail(message, { errorEvent: 'timeout' });
       }, milliseconds);
     };
-    const fail = async (message: string) => {
+    const fail = async (message: string, details: Record<string, unknown> = {}) => {
       if (settled) return;
       settled = true;
       if (stallTimer) window.clearTimeout(stallTimer);
       upload.abort();
-      try { await apiRequest(`/api/mux/job?job_id=${encodeURIComponent(prepared.job_id)}`, { method: 'DELETE' }, traceId); }
-      catch { /* El job se reconciliará por timeout aunque falle la limpieza remota. */ }
-      reject(new Error(`${message} Código ${traceId.slice(0, 8)}.`));
+      const interrupted = hasProgress || lastProgress > 0;
+      const userMessage = interrupted ? 'Se interrumpió la subida del video. Puedes reintentarlo.' : message;
+      console.error('[MUX UPLOAD]', {
+        requestCode: traceId,
+        jobId: prepared.job_id,
+        muxUploadId: prepared.mux_upload_id,
+        uploadStarted: interrupted,
+        lastProgress: Math.round(lastProgress),
+        lastAttemptedChunk,
+        lastSuccessfulChunk,
+        httpStatus: lastHttpStatus,
+        endpointHostname,
+        ...details,
+      });
+      const failure = Object.assign(new Error(`${userMessage} Código ${traceId.slice(0, 8)}.`), {
+        uploadStarted: interrupted,
+        lastProgress,
+        requestCode: traceId,
+        jobId: prepared.job_id,
+        muxUploadId: prepared.mux_upload_id,
+      }) as MuxUploadFailure;
+      reject(failure);
+      void apiRequest(`/api/mux/job?job_id=${encodeURIComponent(prepared.job_id)}`, { method: 'DELETE' }, traceId)
+        .catch((cleanupReason: unknown) => muxClientLog(traceId, 'upload.cleanup-error', { message: cleanupReason instanceof Error ? cleanupReason.message : String(cleanupReason) }));
     };
     armStallTimer();
     upload.on('attempt', (event) => {
+      lastAttemptedChunk = event.detail?.chunkNumber;
       callbacks.onStage('Iniciando transferencia a Mux…', traceId);
       muxClientLog(traceId, 'upload.start', {
         chunkNumber: event.detail?.chunkNumber,
@@ -185,6 +225,7 @@ export async function startMuxVideoUpload(
       hasProgress = true;
       armStallTimer();
       const progress = Math.max(0, Math.min(100, Number(event.detail) || 0));
+      lastProgress = progress;
       callbacks.onProgress(progress);
       if (progress - lastLoggedProgress >= 5 || progress === 100) {
         lastLoggedProgress = progress;
@@ -202,9 +243,17 @@ export async function startMuxVideoUpload(
       callbacks.onProgress(100);
       callbacks.onProcessing();
       muxClientLog(traceId, 'upload.success', { jobId: prepared.job_id });
+      console.info('[MUX UPLOAD]', { requestCode: traceId, jobId: prepared.job_id, muxUploadId: prepared.mux_upload_id, uploadStarted: true, lastProgress: 100, errorEvent: null, httpStatus: lastHttpStatus, endpointHostname });
       resolve({ jobId: prepared.job_id });
     });
+    upload.on('chunkSuccess', (event) => {
+      lastSuccessfulChunk = event.detail?.chunk;
+      lastHttpStatus = event.detail?.response?.statusCode;
+      muxClientLog(traceId, 'upload.chunk-success', { chunkNumber: lastSuccessfulChunk, status: lastHttpStatus, attempts: event.detail?.attempts });
+    });
     upload.on('attemptFailure', (event) => {
+      lastAttemptedChunk = event.detail?.chunkNumber;
+      lastHttpStatus = event.detail?.response?.statusCode;
       muxClientLog(traceId, 'upload.attempt-failure', {
         message: event.detail?.message,
         chunkNumber: event.detail?.chunkNumber,
@@ -222,6 +271,7 @@ export async function startMuxVideoUpload(
       armStallTimer();
     });
     upload.on('error', (event) => {
+      lastHttpStatus = event.detail?.response?.statusCode;
       muxClientLog(traceId, 'upload.error', {
         type: event.type,
         message: event.detail?.message,
@@ -229,7 +279,14 @@ export async function startMuxVideoUpload(
         chunk: event.detail?.chunk,
         attempts: event.detail?.attempts,
       });
-      void fail(hasProgress ? (event.detail?.message || 'No se pudo subir el video a Mux.') : 'No se pudo conectar con el servicio de video.');
+      void fail(hasProgress ? 'Se interrumpió la subida del video. Puedes reintentarlo.' : 'No se pudo conectar con el servicio de video.', {
+        errorEvent: event.type,
+        message: event.detail?.message,
+        chunkNumber: event.detail?.chunk,
+        attempts: event.detail?.attempts,
+        httpStatus: event.detail?.response?.statusCode,
+        networkError: !event.detail?.response,
+      });
     });
   });
 }
