@@ -18,7 +18,7 @@ type FormValues = {
   published: boolean; featured: boolean; amenityIds: string[];
 };
 type Errors = Partial<Record<keyof FormValues, string>>;
-type PendingImage = { file: File; preview: string };
+type PendingImage = { id: string; file: File; preview: string; position?: number; status: 'pending' | 'uploading' | 'failed'; error?: string };
 type PendingVideo = { file: File; preview?: string; isLarge: boolean };
 const videoMimeType = (name?: string) => getVideoContentType(getVideoExtension(name ?? '') ?? 'mp4');
 
@@ -29,6 +29,7 @@ const toString = (value?: number) => value === undefined ? '' : String(value);
 const formatFileSize = (bytes: number) => `${(bytes / (1024 * 1024)).toLocaleString('es-DO', { maximumFractionDigits: 1 })} MB`;
 const fromProperty = (property: AdminProperty): FormValues => ({ title: property.title, slug: property.slug, description: property.description, price: String(property.price), currency: property.currency, operationType: property.operationType, propertyType: property.propertyType, status: property.status, bedrooms: toString(property.bedrooms), bathrooms: toString(property.bathrooms), parkingSpaces: toString(property.parkingSpaces), areaM2: toString(property.areaM2), city: property.city, sector: property.sector ?? '', address: property.address ?? '', latitude: toString(property.latitude), longitude: toString(property.longitude), published: property.published, featured: property.featured, amenityIds: property.amenityIds });
 const optionalNumber = (value: string) => value === '' ? undefined : Number(value);
+const safeLogFileName = (name: string) => name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
 
 function validate(values: FormValues): Errors {
   const errors: Errors = {};
@@ -65,6 +66,7 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
   const [videoPlaybackWarning, setVideoPlaybackWarning] = useState(false);
   const [videoDimensions, setVideoDimensions] = useState({ width: 9, height: 16 });
   const [busy, setBusy] = useState(false); const [uploadStatus, setUploadStatus] = useState(''); const [notice, setNotice] = useState<string | null>(() => sessionStorage.getItem('adminNotice'));
+  const [imageUploadStatus, setImageUploadStatus] = useState('');
   const [slugTouched, setSlugTouched] = useState(Boolean(initial)); const [confirmAction, setConfirmAction] = useState<'delete' | 'archive' | 'publish' | 'video' | null>(null);
   const [muxJob, setMuxJob] = useState<MuxVideoJob>();
   const [muxProgress, setMuxProgress] = useState(0);
@@ -102,7 +104,13 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
 
   const chooseImages = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []); const accepted: PendingImage[] = []; const rejected: string[] = [];
-    files.forEach((file) => { if (!['image/jpeg', 'image/png', 'image/webp', 'image/avif'].includes(file.type)) rejected.push(`${file.name}: formato no permitido`); else if (file.size > 10 * 1024 * 1024) rejected.push(`${file.name}: supera 10 MB`); else accepted.push({ file, preview: URL.createObjectURL(file) }); });
+    files.forEach((file, index) => {
+      const filename = safeLogFileName(file.name);
+      if (!['image/jpeg', 'image/png', 'image/webp', 'image/avif'].includes(file.type)) { rejected.push(`${file.name}: formato no permitido`); console.warn('[PROPERTY IMAGES]', { stage: 'selection.rejected', index, filename, size: file.size, mime: file.type, reason: 'mime_not_allowed' }); }
+      else if (file.size > 10 * 1024 * 1024) { rejected.push(`${file.name}: supera 10 MB`); console.warn('[PROPERTY IMAGES]', { stage: 'selection.rejected', index, filename, size: file.size, mime: file.type, reason: 'file_too_large' }); }
+      else accepted.push({ id: crypto.randomUUID(), file, preview: URL.createObjectURL(file), status: 'pending' });
+    });
+    console.info('[PROPERTY IMAGES]', { stage: 'selection.complete', selectedCount: files.length, acceptedCount: accepted.length, rejectedCount: rejected.length, previewStrategy: 'object-url' });
     setPending((current) => [...current, ...accepted]); if (rejected.length) setNotice(rejected.join('. ')); event.target.value = '';
   };
 
@@ -162,6 +170,47 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
     window.location.replace(`/admin/properties/${propertyId}/edit`);
   };
 
+  const uploadImageQueue = async (propertyId: string, candidates: PendingImage[]) => {
+    let startedCount = 0; let uploadedCount = 0; let failedCount = 0; let dbInsertedCount = 0;
+    let nextPosition = Math.max(-1, ...images.map((image) => image.position), ...pending.map((image) => image.position ?? -1)) + 1;
+    let hasCover = images.some((image) => image.isCover);
+    console.info('[PROPERTY IMAGES]', { propertyId, selectedCount: candidates.length, startedCount, uploadedCount, failedCount, dbInsertedCount, concurrency: 1 });
+    for (let index = 0; index < candidates.length; index += 1) {
+      const item = candidates[index];
+      const position = item.position ?? nextPosition++;
+      startedCount += 1;
+      setPending((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, position, status: 'uploading', error: undefined } : candidate));
+      setImageUploadStatus(`Subiendo foto ${index + 1} de ${candidates.length}…`);
+      const filename = safeLogFileName(item.file.name);
+      console.info('[PROPERTY IMAGES]', { propertyId, index, filename, size: item.file.size, mime: item.file.type, position, uploadStarted: true });
+      try {
+        const uploaded = await uploadPropertyImage(propertyId, item.file, position, !hasCover);
+        uploadedCount += 1; dbInsertedCount += 1; hasCover ||= uploaded.isCover;
+        setImages((current) => current.some((image) => image.id === uploaded.id) ? current : [...current, { ...uploaded, url: item.preview }].sort((a, b) => a.position - b.position));
+        setPending((current) => current.filter((candidate) => candidate.id !== item.id));
+        console.info('[PROPERTY IMAGES]', { propertyId, index, filename, storagePath: uploaded.storagePath, storageUpload: 'complete', dbInsert: 'complete' });
+      } catch (reason: unknown) {
+        failedCount += 1;
+        const message = reason instanceof Error ? reason.message : `No pudimos subir ${item.file.name}.`;
+        setPending((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, position, status: 'failed', error: message } : candidate));
+        console.error('[PROPERTY IMAGES]', { propertyId, index, filename, size: item.file.size, mime: item.file.type, storageUpload: 'failed_or_incomplete', dbInsert: 'failed_or_not_started', error: message });
+      }
+    }
+    console.info('[PROPERTY IMAGES]', { propertyId, selectedCount: candidates.length, startedCount, uploadedCount, failedCount, dbInsertedCount, concurrency: 1 });
+    setImageUploadStatus(failedCount ? `${uploadedCount} de ${candidates.length} fotos se subieron. ${failedCount} no pudieron subirse.` : `${uploadedCount} de ${candidates.length} fotos se subieron correctamente.`);
+    return { selectedCount: candidates.length, startedCount, uploadedCount, failedCount, dbInsertedCount };
+  };
+
+  const retryPendingImages = async () => {
+    const propertyId = savedPropertyId ?? initial?.id;
+    const candidates = pending.filter((image) => image.status !== 'uploading');
+    if (!propertyId || !candidates.length || busy) return;
+    setBusy(true); setNotice(null);
+    const result = await uploadImageQueue(propertyId, candidates);
+    setNotice(result.failedCount ? `${result.uploadedCount} de ${result.selectedCount} fotos se subieron. ${result.failedCount} fotos siguen pendientes.` : 'Todas las fotos pendientes se subieron correctamente.');
+    setBusy(false);
+  };
+
   const save = async (mode?: 'draft' | 'publish') => {
     const nextErrors = validate(values); setErrors(nextErrors); if (Object.keys(nextErrors).length) { document.querySelector('[aria-invalid="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     if (mode === 'publish' && !images.length && !pending.length && confirmAction !== 'publish') { setConfirmAction('publish'); return; }
@@ -190,17 +239,14 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
       if (!largeVideoError) successNotice = `${successNotice} El video terminó de subir y se está procesando. El video anterior seguirá activo hasta que el nuevo esté listo.`;
     }
 
-    let relatedSaveError: string | undefined;
+    const relatedSaveErrors: string[] = [];
     try {
       await setPropertyAmenities(propertyId, values.amenityIds);
-      for (let index = 0; index < pending.length; index += 1) { setUploadStatus(`Subiendo ${index + 1} de ${pending.length}…`); await uploadPropertyImage(propertyId, pending[index].file, images.length + index, !images.some((image) => image.isCover) && index === 0); }
     } catch (reason: unknown) {
-      relatedSaveError = reason instanceof Error ? reason.message : 'No pudimos guardar todos los datos relacionados de la propiedad.';
+      relatedSaveErrors.push(reason instanceof Error ? reason.message : 'No pudimos guardar las amenidades de la propiedad.');
     }
-    if (relatedSaveError && !selectedVideo?.isLarge) {
-      if (!initial && propertyId) { sessionStorage.setItem('adminNotice', `La propiedad fue creada parcialmente. ${relatedSaveError}`); window.location.replace(`/admin/properties/${propertyId}/edit`); return; }
-      setNotice(relatedSaveError); setBusy(false); setUploadStatus(''); return;
-    }
+    const imageBatch = pending.length ? await uploadImageQueue(propertyId, pending) : undefined;
+    if (imageBatch?.failedCount) relatedSaveErrors.push(`${imageBatch.uploadedCount} de ${imageBatch.selectedCount} fotos se subieron. ${imageBatch.failedCount} fotos siguen pendientes para reintentar.`);
 
     if (selectedVideo && !selectedVideo.isLarge) {
       try {
@@ -217,7 +263,7 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
       }
     }
     if (largeVideoError) {
-      const relatedDetail = relatedSaveError ? ` Además: ${relatedSaveError}` : '';
+      const relatedDetail = relatedSaveErrors.length ? ` Además: ${relatedSaveErrors.join(' ')}` : '';
       const failureSummary = largeVideoError.interrupted ? 'Se interrumpió la subida del video. Puedes reintentarlo.' : 'No se pudo iniciar la subida del video.';
       setUploadStatus(largeVideoError.interrupted ? 'Se interrumpió la subida del video. Puedes reintentarlo.' : 'No se pudo iniciar la subida del video. Intenta nuevamente.');
       setNotice(`Los cambios de la propiedad se guardaron. ${failureSummary} El archivo sigue seleccionado. ${largeVideoError.message}${relatedDetail}`);
@@ -225,7 +271,12 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
       setBusy(false);
       return;
     }
-    if (relatedSaveError) successNotice = `${successNotice} No se pudieron guardar todos los datos relacionados: ${relatedSaveError}`;
+    if (relatedSaveErrors.length) {
+      setNotice(`${successNotice} ${relatedSaveErrors.join(' ')}`);
+      if (!initial) window.history.replaceState({}, '', `/admin/properties/${propertyId}/edit`);
+      setBusy(false);
+      return;
+    }
     sessionStorage.setItem('adminNotice', successNotice);
     window.location.replace(`/admin/properties/${propertyId}/edit`);
   };
@@ -269,7 +320,7 @@ export default function PropertyForm({ initial }: { initial?: AdminProperty }) {
     <section className="form-section"><div className="form-section-head"><span>04</span><div><h2>Visibilidad y amenidades</h2><p>Controla cómo aparece la propiedad.</p></div></div><div className="toggle-row"><label><input type="checkbox" checked={values.published} onChange={(e) => set('published', e.target.checked)} /><span><strong>Publicada</strong><small>Visible en la página web</small></span></label><label><input type="checkbox" checked={values.featured} onChange={(e) => set('featured', e.target.checked)} /><span><strong>Destacada</strong><small>Aparece con prioridad en el inicio</small></span></label></div><div className="amenity-checks">{amenities.map((amenity) => <label key={amenity.id}><input type="checkbox" checked={values.amenityIds.includes(amenity.id)} onChange={(e) => set('amenityIds', e.target.checked ? [...values.amenityIds, amenity.id] : values.amenityIds.filter((id) => id !== amenity.id))} />{amenity.name}</label>)}</div></section>
     <section className="form-section"><div className="form-section-head"><span>05</span><div><h2>Fotografías</h2><p>JPEG, PNG, WebP o AVIF. Máximo 10 MB por archivo.</p></div></div><label className="image-drop"><ImagePlus /><strong>Seleccionar fotografías</strong><span>Puedes seleccionar varios archivos</span><input type="file" accept="image/jpeg,image/png,image/webp,image/avif" multiple onChange={chooseImages} /></label>
       {!!images.length && <div className="image-manager">{images.map((image, index) => <article className="managed-image" key={image.id}><img src={image.url} alt={`Fotografía ${index + 1} de ${values.title}`} /><span className="photo-position">Foto {index + 1}</span>{image.isCover && <span className="cover-label"><Star size={13} /> Portada</span>}<div className="image-actions"><button type="button" onClick={() => void moveImage(index, -1)} disabled={index === 0 || busy} aria-label="Mover imagen arriba" title="Mover arriba"><ArrowUp /><span className="action-label">Arriba</span></button><button type="button" onClick={() => void moveImage(index, 1)} disabled={index === images.length - 1 || busy} aria-label="Mover imagen abajo" title="Mover abajo"><ArrowDown /><span className="action-label">Abajo</span></button><button type="button" onClick={() => void makeCover(image.id)} disabled={image.isCover || busy} aria-label="Usar como portada" title="Usar como portada"><Star /><span className="action-label">Portada</span></button><button type="button" className="danger" onClick={() => void removeImage(image)} disabled={busy} aria-label="Eliminar imagen" title="Eliminar"><Trash2 /><span className="action-label">Eliminar</span></button></div></article>)}</div>}
-      {!!pending.length && <><h3 className="pending-title">Pendientes de subir</h3><div className="image-manager">{pending.map((item, index) => <article className="managed-image" key={item.preview}><img src={item.preview} alt={`Nueva fotografía ${index + 1}`} /><button type="button" className="remove-pending" onClick={() => { URL.revokeObjectURL(item.preview); setPending((current) => current.filter((candidate) => candidate !== item)); }} aria-label="Quitar fotografía"><X /></button></article>)}</div></>}{uploadStatus && <p className="upload-status">{uploadStatus}</p>}
+      {!!pending.length && <><h3 className="pending-title">Pendientes de subir</h3><div className="image-manager">{pending.map((item, index) => <article className={`managed-image pending-image-${item.status}`} key={item.id}><img src={item.preview} alt={`Nueva fotografía ${index + 1}`} />{item.status !== 'pending' && <span className="pending-image-status" title={item.error}>{item.status === 'uploading' ? 'Subiendo…' : 'Pendiente de reintento'}</span>}<button type="button" className="remove-pending" disabled={item.status === 'uploading'} onClick={() => { URL.revokeObjectURL(item.preview); setPending((current) => current.filter((candidate) => candidate.id !== item.id)); }} aria-label="Quitar fotografía"><X /></button></article>)}</div></>}{imageUploadStatus && <p className="upload-status">{imageUploadStatus}</p>}{pending.some((image) => image.status === 'failed') && <button type="button" className="button outline dark" disabled={busy} onClick={() => void retryPendingImages()}>Reintentar fotos pendientes</button>}
     </section>
     <section className="form-section"><div className="form-section-head"><span>06</span><div><h2>Video de la propiedad</h2><p>Selecciona un MP4 o MOV; el destino se elige automáticamente.</p></div></div>
       <label className="video-picker"><span><strong>Video MP4 o MOV</strong><small>Puedes subir videos directamente desde iPhone.<br />Hasta 50 MB se guarda en Supabase.<br />Los videos mayores se optimizan con Mux para reproducción web.</small></span><span className="button outline dark">Seleccionar video</span><input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" onChange={chooseVideo} /></label>

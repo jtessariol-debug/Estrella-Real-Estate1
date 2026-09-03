@@ -132,15 +132,27 @@ export async function setPropertyAmenities(propertyId: string, amenityIds: strin
 
 const sanitizeFileName = (name: string) => name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
 
-export async function uploadPropertyImage(propertyId: string, file: File, position: number, isCover: boolean): Promise<void> {
+export async function uploadPropertyImage(propertyId: string, file: File, position: number, isCover: boolean): Promise<AdminPropertyImage> {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? 'jpg';
   const base = sanitizeFileName(file.name.replace(/\.[^.]+$/, '')) || 'property-image';
+  const imageId = crypto.randomUUID();
   const path = `properties/${propertyId}/${Date.now()}-${crypto.randomUUID()}-${base}.${extension}`;
   const storage = requireSupabase().storage.from('property-images');
+  console.info('[PROPERTY IMAGE]', { propertyId, stage: 'storage.start', filename: `${base}.${extension}`, size: file.size, mime: file.type, position });
   const uploaded = await storage.upload(path, file, { cacheControl: '3600', upsert: false, contentType: file.type });
-  if (uploaded.error) throw adminError(uploaded.error, `No pudimos subir ${file.name}.`);
-  const inserted = await requireSupabase().from('property_images').insert({ property_id: propertyId, storage_path: path, image_url: null, position, is_cover: isCover });
-  if (inserted.error) { await storage.remove([path]); throw adminError(inserted.error, `La imagen ${file.name} se subió, pero no pudimos registrarla.`); }
+  if (uploaded.error) {
+    console.error('[PROPERTY IMAGE]', { propertyId, stage: 'storage.error', filename: `${base}.${extension}`, storagePath: path, errorCode: uploaded.error.name, statusCode: uploaded.error.statusCode });
+    throw adminError(uploaded.error, `No pudimos subir ${file.name}.`);
+  }
+  console.info('[PROPERTY IMAGE]', { propertyId, stage: 'storage.complete', filename: `${base}.${extension}`, storagePath: path });
+  const inserted = await requireSupabase().from('property_images').insert({ id: imageId, property_id: propertyId, storage_path: path, image_url: null, position, is_cover: isCover });
+  if (inserted.error) {
+    console.error('[PROPERTY IMAGE]', { propertyId, stage: 'database.error', filename: `${base}.${extension}`, storagePath: path, errorCode: inserted.error.code });
+    await storage.remove([path]);
+    throw adminError(inserted.error, `La imagen ${file.name} se subió, pero no pudimos registrarla.`);
+  }
+  console.info('[PROPERTY IMAGE]', { propertyId, stage: 'database.complete', filename: `${base}.${extension}`, storagePath: path, imageId });
+  return { id: imageId, storagePath: path, url: '', position, isCover };
 }
 
 export async function getPropertyVideoSignedUrl(storagePath: string): Promise<string> {
